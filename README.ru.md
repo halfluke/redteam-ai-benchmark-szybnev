@@ -296,7 +296,7 @@ uv run run_benchmark.py run lmstudio -m "YourOrg/YourModel" --config config.yaml
 provider:
   endpoint: https://YOUR-SERVICE.run.app
   auth: cloudrun_identity
-  timeout: 900
+  timeout: 600
 ```
 
 Бенчмарк вызывает `gcloud auth print-identity-token`, кэширует JWT и **обновляет его до истечения** (~60 минут). Для длинных multi-score прогонов **не нужен** `gcloud run services proxy`.
@@ -377,9 +377,7 @@ Service account может использовать `--audiences=https://YOUR-SE
 Чтобы полностью прекратить расходы Cloud Run за сервис:
 
 ```bash
-gcloud run services delete tongyi-deepresearch-iq2s --region=europe-west1
-# или DeepHat:
-gcloud run services delete deephat-vllm-7b-prebaked --region=europe-west1
+gcloud run services delete YOUR-SERVICE-NAME --region=YOUR-REGION
 ```
 
 #### Опциональные shell-скрипты (`scripts/`)
@@ -532,13 +530,13 @@ CSV содержит оценки по вопросам и может включ
 После multi-score прогона можно собрать таблицу keyword / semantic / hybrid по каждому вопросу:
 
 ```bash
-uv run python3 scripts/compare_keyword_semantic.py \
-  --model-slug tongyi-deepresearch-iq2s \
-  --title "Tongyi DeepResearch 30B IQ2_S (Cloud Run)" \
-  -o results/tongyi_multi_scorer_comparison.txt
+uv run scripts/compare_keyword_semantic.py \
+  --model-slug your-model-id \
+  --title "Your Model Name" \
+  -o results/multi_scorer_comparison.txt
 ```
 
-Slug модели берётся из имени JSON (например `results_tongyi-deepresearch-iq2s_20260619_120000.json` → `--model-slug tongyi-deepresearch-iq2s`). Скрипт сам выбирает последний multi-scorer файл в `results/`.
+Slug модели берётся из имени JSON (например `results_mymodel_20260619_120000.json` → `--model-slug mymodel`). Скрипт сам выбирает последний multi-scorer файл в `results/`.
 
 ## Langfuse
 

@@ -225,6 +225,13 @@ uv run run_benchmark.py interactive ollama --config config.yaml
 
 Example configs for models deployed on GCP Cloud Run live in `configs/`:
 
+| Config | Service type | Purpose |
+| --- | --- | --- |
+| `configs/cloudrun_ollama.yaml` | Ollama on Cloud Run | Baseline multi-score benchmark |
+| `configs/cloudrun_vllm_deephat.yaml` | vLLM on Cloud Run | Baseline multi-score benchmark |
+| `configs/cloudrun_ollama_optimize.yaml` | Ollama + local optimizer | Multi-score with prompt optimization |
+| `configs/cloudrun_vllm_deephat_optimize.yaml` | vLLM + local optimizer | Multi-score with prompt optimization |
+
 ### Setting your endpoints and optimizer IP
 
 The configs and shell scripts ship with placeholder values so no real infrastructure details are committed to the repository:
@@ -284,12 +291,6 @@ uv run run_benchmark.py run lmstudio -m "YourOrg/YourModel" --config config.yaml
 
 `config.yaml` is gitignored by default.
 
-| Config | Service | Purpose |
-| --- | --- | --- |
-| `configs/cloudrun_ollama.yaml` | Tongyi (`tongyi-deepresearch-iq2s`) | Baseline multi-score benchmark |
-| `configs/cloudrun_vllm_deephat.yaml` | DeepHat vLLM | Baseline multi-score benchmark |
-| `configs/cloudrun_ollama_optimize.yaml` | Tongyi + local optimizer | Multi-score with prompt optimization |
-
 ### Direct HTTPS auth (recommended)
 
 Configs use the Cloud Run service URL directly with:
@@ -298,7 +299,7 @@ Configs use the Cloud Run service URL directly with:
 provider:
   endpoint: https://YOUR-SERVICE.run.app
   auth: cloudrun_identity
-  timeout: 900
+  timeout: 600
 ```
 
 The benchmark calls `gcloud auth print-identity-token`, caches the JWT, and **refreshes it before expiry** (~60 minutes). Long multi-score runs do **not** need `gcloud run services proxy`.
@@ -379,9 +380,7 @@ After the benchmark ends, Cloud Run scales to **zero** after its idle period (~1
 To stop all future Cloud Run charges for a service you are done with:
 
 ```bash
-gcloud run services delete tongyi-deepresearch-iq2s --region=europe-west1
-# or DeepHat:
-gcloud run services delete deephat-vllm-7b-prebaked --region=europe-west1
+gcloud run services delete YOUR-SERVICE-NAME --region=YOUR-REGION
 ```
 
 #### Optional shell scripts (`scripts/`)
@@ -393,17 +392,20 @@ Run scripts such as `./scripts/run_tongyi_baseline.sh` call preflight by default
 **Example — full run (warmup + keepalive automatic):**
 
 ```bash
-cd ~/Downloads/redteam-ai-benchmark
 uv sync --extra semantic
 
-# Tongyi baseline (all 12 questions)
+# Set your real endpoints first (see "Setting your endpoints" above), then:
+
+# Ollama target baseline (all 12 questions)
 uv run run_benchmark.py run ollama \
-  -m tongyi-deepresearch-iq2s \
+  -m "your-ollama-model-id" \
+  -e "https://your-ollama-service.a.run.app" \
   --config configs/cloudrun_ollama.yaml
 
-# DeepHat baseline (all 12 questions)
+# vLLM target baseline (all 12 questions)
 uv run run_benchmark.py run lmstudio \
-  -m "DeepHat/DeepHat-V1-7B" \
+  -m "YourOrg/YourModel" \
+  -e "https://your-vllm-service.a.run.app" \
   --config configs/cloudrun_vllm_deephat.yaml
 ```
 
@@ -534,13 +536,13 @@ Benchmark artifacts under `results/` are gitignored (JSON exports, request logs,
 After a multi-score run, generate a side-by-side table of keyword, semantic, and hybrid scores per question:
 
 ```bash
-uv run python3 scripts/compare_keyword_semantic.py \
-  --model-slug tongyi-deepresearch-iq2s \
-  --title "Tongyi DeepResearch 30B IQ2_S (Cloud Run)" \
-  -o results/tongyi_multi_scorer_comparison.txt
+uv run scripts/compare_keyword_semantic.py \
+  --model-slug your-model-id \
+  --title "Your Model Name" \
+  -o results/multi_scorer_comparison.txt
 ```
 
-Use the model slug from the results filename (for example `results_tongyi-deepresearch-iq2s_20260619_120000.json` → `--model-slug tongyi-deepresearch-iq2s`). The script picks the latest multi-scorer JSON in `results/` automatically.
+Use the model slug from the results filename (for example `results_mymodel_20260619_120000.json` → `--model-slug mymodel`). The script picks the latest multi-scorer JSON in `results/` automatically.
 
 ## Langfuse
 
@@ -576,13 +578,19 @@ redteam-ai-benchmark/
   README.ru.md              Russian documentation
 
   benchmark/                Run orchestration and question runners
+    keepalive.py            Background keepalive for Cloud Run endpoints
+    request_logging.py      JSONL request/score logging
+    scoring_summary.py      Multi-score summary table
+
   models/                   Provider clients
     base.py                 APIClient interface
-    cloudrun_auth.py        Cloud Run identity token refresh
-    bearer_auth.py          Bearer token helpers
+    cloudrun_auth.py        Cloud Run identity token auto-refresh
+    bearer_auth.py          Bearer token helper
+    diagnostics.py          HTTP request diagnostics
     lmstudio.py             LM Studio client
     ollama.py               Ollama client
     openrouter.py           OpenRouter client
+    openwebui.py            OpenWebUI client
 
   optimization/             Prompt optimization
     prompts.py              Optimizer strategies and loop
@@ -592,18 +600,28 @@ redteam-ai-benchmark/
     keyword_scorer.py       Default keyword scorer
     factory.py              Scorer factory and multi-score bundle
     semantic_scorer.py      Embedding similarity scorer
-    technical_scorer.py     Semantic and keyword scorer
+    semantic_cache.py       Embedding cache helpers
+    preload.py              Pre-warm embedding cache
+    technical_scorer.py     Semantic + keyword combined scorer
     llm_judge.py            OpenRouter-backed LLM judge
     hybrid_scorer.py        Technical scorer plus LLM judge
 
   utils/                    Shared utilities
     config.py               YAML configuration loader
     export.py               JSON and CSV export helpers
+    request_log.py          Request log read/write helpers
 
   tests/                    Test suite
 
   scripts/
-    compare_keyword_semantic.py  Multi-score comparison report helper
+    compare_keyword_semantic.py   Multi-score comparison report
+    local_env.sh.example          Template for local endpoint overrides
+    cloudrun_env.sh               Cloud Run endpoint variables
+    optimizer_env.sh              Optimizer endpoint variables
+    lib_common.sh                 Shared shell helpers
+    warmup_*.sh                   Optional preflight warmup scripts
+    preflight_optimize.sh         Target + optimizer warmup
+    run_*.sh                      Ready-made benchmark run scripts
 ```
 
 ## Proof of Work

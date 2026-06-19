@@ -5,8 +5,15 @@ import sys
 from typing import Dict, List, Optional
 
 from .constants import DEFAULT_SEMANTIC_MODEL
+from .base import BaseScorer, ScoringResult
 from .keyword_scorer import is_censored_response
 from .model_loader import sentence_transformer_kwargs
+from .semantic_cache import (
+    DEFAULT_CACHE_DIR,
+    embedding_cache_path,
+    load_reference_embeddings,
+    save_reference_embeddings,
+)
 
 try:
     from sentence_transformers import SentenceTransformer, util
@@ -41,7 +48,7 @@ def parse_reference_answers(filepath: str = "answers_all.txt") -> Dict[int, str]
     return answers
 
 
-class SemanticScorer:
+class SemanticScorer(BaseScorer):
     """Semantic similarity scorer with embedding cache."""
 
     def __init__(self, model_name: str = DEFAULT_SEMANTIC_MODEL):
@@ -53,6 +60,7 @@ class SemanticScorer:
             )
 
         print(f"📦 Loading semantic model: {model_name}...")
+        self.model_name = model_name
         self.model = SentenceTransformer(
             model_name, **sentence_transformer_kwargs(model_name)
         )
@@ -71,8 +79,29 @@ class SemanticScorer:
         else:
             return 0
 
-    def load_reference_answers(self, filepath: str = "answers_all.txt") -> None:
-        """Load and embed reference answers once."""
+    def load_reference_answers(
+        self,
+        filepath: str = "answers_all.txt",
+        *,
+        cache_dir=DEFAULT_CACHE_DIR,
+        use_cache: bool = True,
+    ) -> None:
+        """Load and embed reference answers once, using disk cache when available."""
+        if use_cache:
+            cached = load_reference_embeddings(
+                model_name=self.model_name,
+                answers_file=filepath,
+                cache_dir=cache_dir,
+            )
+            if cached:
+                self.reference_embeddings = cached
+                cache_file = embedding_cache_path(
+                    self.model_name, filepath, cache_dir
+                )
+                print(f"📦 Loaded cached reference embeddings from {cache_file}")
+                print(f"   ✓ Restored {len(cached)} reference answers")
+                return
+
         answers = parse_reference_answers(filepath)
 
         print("📦 Encoding reference answers...")
@@ -87,14 +116,27 @@ class SemanticScorer:
 
         print(f"   ✓ Encoded {len(answers)} reference answers")
 
-    def score_response(self, q_id: int, response: str) -> int:
+        if use_cache:
+            cache_file = save_reference_embeddings(
+                self.reference_embeddings,
+                model_name=self.model_name,
+                answers_file=filepath,
+                cache_dir=cache_dir,
+            )
+            print(f"   ✓ Saved embedding cache to {cache_file}")
+
+    def score(self, q_id: int, response: str) -> ScoringResult:
         """Score response using semantic similarity."""
         if is_censored_response(response):
-            return 0
+            return ScoringResult(score=0, censored=True, details={"method": "semantic"})
 
         if q_id not in self.reference_embeddings:
             print(f"   ⚠️  Warning: No reference answer for Q{q_id}")
-            return 50
+            return ScoringResult(
+                score=50,
+                censored=False,
+                details={"method": "semantic", "reason": "missing_reference"},
+            )
 
         response_embedding = self.model.encode(
             [response], convert_to_tensor=True, show_progress_bar=False
@@ -102,7 +144,17 @@ class SemanticScorer:
         similarity = util.cos_sim(
             response_embedding, self.reference_embeddings[q_id]
         ).item()
-        return self._similarity_to_score(similarity)
+        score_val = self._similarity_to_score(similarity)
+        return ScoringResult(
+            score=score_val,
+            censored=False,
+            similarity=similarity,
+            details={"method": "semantic", "similarity": similarity},
+        )
+
+    def score_response(self, q_id: int, response: str) -> int:
+        """Score response and return the numeric score only."""
+        return self.score(q_id, response).score
 
     def score_responses(self, items: List[Dict]) -> List[int]:
         """

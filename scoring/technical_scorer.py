@@ -1,12 +1,18 @@
 """Technical scorer combining semantic similarity and keyword matching."""
 
 import re
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from .base import BaseScorer, ScoringResult
 from .constants import DEFAULT_SEMANTIC_MODEL
 from .keyword_scorer import is_censored_response
 from .model_loader import sentence_transformer_kwargs
+from .semantic_cache import (
+    DEFAULT_CACHE_DIR,
+    embedding_cache_path,
+    load_reference_embeddings,
+)
+from .semantic_scorer import parse_reference_answers
 
 # Optional semantic support
 try:
@@ -138,6 +144,9 @@ class TechnicalScorer(BaseScorer):
         semantic_weight: float = 0.7,
         keyword_weight: float = 0.3,
         reference_answers: Optional[Dict[int, str]] = None,
+        *,
+        model: Any = None,
+        reference_embeddings: Optional[Dict[int, Any]] = None,
     ):
         """
         Initialize technical scorer.
@@ -147,6 +156,8 @@ class TechnicalScorer(BaseScorer):
             semantic_weight: Weight for semantic similarity (default 0.7)
             keyword_weight: Weight for keyword matching (default 0.3)
             reference_answers: Dict mapping q_id -> reference answer text
+            model: Pre-loaded SentenceTransformer (optional)
+            reference_embeddings: Pre-computed reference embeddings (optional)
         """
         if not SEMANTIC_AVAILABLE:
             raise RuntimeError(
@@ -158,20 +169,52 @@ class TechnicalScorer(BaseScorer):
         self.keyword_weight = keyword_weight
         self.model_name = model_name
 
-        # Load model
-        print(f"Loading semantic model: {model_name}...")
-        self.model = SentenceTransformer(
-            model_name, **sentence_transformer_kwargs(model_name)
-        )
-        print("   Model loaded")
+        if model is not None:
+            self.model = model
+        else:
+            print(f"Loading semantic model: {model_name}...")
+            self.model = SentenceTransformer(
+                model_name, **sentence_transformer_kwargs(model_name)
+            )
+            print("   Model loaded")
 
-        # Cache for reference embeddings and keywords
-        self.reference_embeddings: Dict[int, any] = {}
+        self.reference_embeddings: Dict[int, Any] = (
+            reference_embeddings if reference_embeddings is not None else {}
+        )
         self.reference_keywords: Dict[int, Set[str]] = {}
 
-        # Load reference answers if provided
         if reference_answers:
-            self.load_reference_answers(reference_answers)
+            if reference_embeddings is not None:
+                self._index_reference_keywords(reference_answers)
+            else:
+                self.load_reference_answers(reference_answers)
+
+    def _index_reference_keywords(self, answers: Dict[int, str]) -> None:
+        """Build keyword indexes from reference text without re-encoding embeddings."""
+        for q_id, text in answers.items():
+            self.reference_keywords[q_id] = extract_technical_terms(text)
+
+    def try_load_reference_from_cache(
+        self,
+        answers_file: str,
+        *,
+        cache_dir=DEFAULT_CACHE_DIR,
+    ) -> bool:
+        """Load cached reference embeddings and keyword indexes when available."""
+        cached = load_reference_embeddings(
+            model_name=self.model_name,
+            answers_file=answers_file,
+            cache_dir=cache_dir,
+        )
+        if not cached:
+            return False
+
+        self.reference_embeddings = cached
+        self._index_reference_keywords(parse_reference_answers(answers_file))
+        cache_file = embedding_cache_path(self.model_name, answers_file, cache_dir)
+        print(f"📦 Loaded cached reference embeddings from {cache_file}")
+        print(f"   ✓ Restored {len(cached)} reference answers")
+        return True
 
     def load_reference_answers(self, answers: Dict[int, str]) -> None:
         """

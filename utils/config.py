@@ -20,6 +20,9 @@ class ProviderConfig:
     api_key_env: Optional[str] = None
     default_model: Optional[str] = None
     timeout: int = 120
+    auth: Optional[str] = None  # e.g. cloudrun_identity
+    cloudrun_audience: Optional[str] = None
+    cloudrun_impersonate_service_account: Optional[str] = None
 
 
 @dataclass
@@ -27,6 +30,7 @@ class ScoringConfig:
     """Configuration for scoring system."""
 
     method: str = "keyword"  # keyword, semantic, hybrid, llm_judge
+    methods: Optional[List[str]] = None  # multi-score, e.g. [keyword, semantic, hybrid]
     semantic_model: str = DEFAULT_SEMANTIC_MODEL
     semantic_weight: float = 0.7
     keyword_weight: float = 0.3
@@ -52,13 +56,29 @@ class OptimizationConfig:
     enabled: bool = False
     optimizer_model: Optional[str] = None
     optimizer_endpoint: Optional[str] = None
+    optimizer_timeout: int = 600
+    optimizer_max_tokens: int = 1024
     max_iterations: int = 3
+    trigger: str = "keyword_zero"  # keyword_zero | any_zero (multiscore)
+    ollama_keep_alive: str = "30m"  # keep optimizer model loaded between/after long calls
     strategies: List[str] = field(default_factory=lambda: [
         "role_playing",
         "technical",
         "few_shot",
         "cve_framing",
     ])
+
+
+@dataclass
+class KeepaliveConfig:
+    """Configuration for background model warmup / keepalive pings."""
+
+    enabled: bool = True
+    interval_s: float = 60
+    max_tokens: int = 16
+    prompt: str = "Say OK"
+    timeout_s: int = 90
+    # ollama_keep_alive removed: target pings are plain HTTP; use optimization.ollama_keep_alive for optimizer.
 
 
 @dataclass
@@ -79,6 +99,8 @@ class BenchmarkConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
+    keepalive: KeepaliveConfig = field(default_factory=KeepaliveConfig)
+    keepalive_in_yaml: bool = False
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     questions_file: str = "benchmark.json"
     answers_file: str = "answers_all.txt"
@@ -86,6 +108,7 @@ class BenchmarkConfig:
     max_tokens: int = 768
     temperature: float = 0.2
     concurrency: int = 1
+    request_log: Optional[str] = None
 
 
 # Default providers configuration
@@ -121,6 +144,11 @@ def _dict_to_provider_config(data: Dict[str, Any]) -> ProviderConfig:
         api_key_env=data.get("api_key_env"),
         default_model=data.get("default_model"),
         timeout=data.get("timeout", 120),
+        auth=data.get("auth"),
+        cloudrun_audience=data.get("cloudrun_audience"),
+        cloudrun_impersonate_service_account=data.get(
+            "cloudrun_impersonate_service_account"
+        ),
     )
 
 
@@ -128,6 +156,7 @@ def _dict_to_scoring_config(data: Dict[str, Any]) -> ScoringConfig:
     """Convert dict to ScoringConfig."""
     return ScoringConfig(
         method=data.get("method", "keyword"),
+        methods=data.get("methods"),
         semantic_model=data.get("semantic_model", DEFAULT_SEMANTIC_MODEL),
         semantic_weight=data.get("semantic_weight", 0.7),
         keyword_weight=data.get("keyword_weight", 0.3),
@@ -147,13 +176,28 @@ def _dict_to_export_config(data: Dict[str, Any]) -> ExportConfig:
     )
 
 
+def _dict_to_keepalive_config(data: Dict[str, Any]) -> KeepaliveConfig:
+    """Convert dict to KeepaliveConfig."""
+    return KeepaliveConfig(
+        enabled=data.get("enabled", bool(data)),
+        interval_s=data.get("interval_s", 60),
+        max_tokens=data.get("max_tokens", 16),
+        prompt=data.get("prompt", "Say OK"),
+        timeout_s=data.get("timeout_s", 90),
+    )
+
+
 def _dict_to_optimization_config(data: Dict[str, Any]) -> OptimizationConfig:
     """Convert dict to OptimizationConfig."""
     return OptimizationConfig(
         enabled=data.get("enabled", False),
         optimizer_model=data.get("optimizer_model"),
         optimizer_endpoint=data.get("optimizer_endpoint"),
+        optimizer_timeout=data.get("optimizer_timeout", 600),
+        optimizer_max_tokens=data.get("optimizer_max_tokens", 1024),
         max_iterations=data.get("max_iterations", 3),
+        trigger=data.get("trigger", "keyword_zero"),
+        ollama_keep_alive=data.get("ollama_keep_alive", "30m"),
         strategies=data.get("strategies", [
             "role_playing", "technical", "few_shot", "cve_framing"
         ]),
@@ -211,6 +255,14 @@ def load_config(config_path: str) -> BenchmarkConfig:
                 api_key_env=provider_data.get("api_key_env", provider.api_key_env),
                 default_model=provider_data.get("default_model", provider.default_model),
                 timeout=provider_data.get("timeout", provider.timeout),
+                auth=provider_data.get("auth", provider.auth),
+                cloudrun_audience=provider_data.get(
+                    "cloudrun_audience", provider.cloudrun_audience
+                ),
+                cloudrun_impersonate_service_account=provider_data.get(
+                    "cloudrun_impersonate_service_account",
+                    provider.cloudrun_impersonate_service_account,
+                ),
             )
     else:
         provider = _dict_to_provider_config(provider_data)
@@ -219,6 +271,8 @@ def load_config(config_path: str) -> BenchmarkConfig:
     scoring = _dict_to_scoring_config(data.get("scoring", {}))
     export = _dict_to_export_config(data.get("export", {}))
     optimization = _dict_to_optimization_config(data.get("optimization", {}))
+    keepalive_in_yaml = "keepalive" in data
+    keepalive = _dict_to_keepalive_config(data.get("keepalive", {}))
     langfuse = _dict_to_langfuse_config(data.get("langfuse", {}))
 
     config = BenchmarkConfig(
@@ -226,6 +280,8 @@ def load_config(config_path: str) -> BenchmarkConfig:
         scoring=scoring,
         export=export,
         optimization=optimization,
+        keepalive=keepalive,
+        keepalive_in_yaml=keepalive_in_yaml,
         langfuse=langfuse,
         questions_file=data.get("questions_file", "benchmark.json"),
         answers_file=data.get("answers_file", "answers_all.txt"),
@@ -233,6 +289,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
         max_tokens=data.get("max_tokens", 768),
         temperature=data.get("temperature", 0.2),
         concurrency=data.get("concurrency", 1),
+        request_log=data.get("request_log"),
     )
     validate_config(config)
     return config
@@ -250,6 +307,22 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("concurrency must be > 0")
     if config.provider.timeout <= 0:
         raise ValueError("provider.timeout must be > 0")
+    if config.provider.auth == "cloudrun_identity" and not config.provider.endpoint:
+        raise ValueError(
+            "provider.endpoint is required when auth is cloudrun_identity"
+        )
+    if config.provider.auth and config.provider.auth != "cloudrun_identity":
+        raise ValueError(f"Unsupported provider.auth: {config.provider.auth}")
+    if config.optimization.trigger not in ("keyword_zero", "any_zero"):
+        raise ValueError(
+            "optimization.trigger must be keyword_zero or any_zero"
+        )
+    if config.keepalive.interval_s <= 0:
+        raise ValueError("keepalive.interval_s must be > 0")
+    if config.keepalive.max_tokens <= 0:
+        raise ValueError("keepalive.max_tokens must be > 0")
+    if config.keepalive.timeout_s <= 0:
+        raise ValueError("keepalive.timeout_s must be > 0")
 
     unsupported_formats = set(config.export.formats) - {"json", "csv"}
     if unsupported_formats:
@@ -326,6 +399,14 @@ def save_config(config: BenchmarkConfig, config_path: str) -> None:
     # Add optional fields
     if config.provider.api_key_env:
         data["provider"]["api_key_env"] = config.provider.api_key_env
+    if config.provider.auth:
+        data["provider"]["auth"] = config.provider.auth
+    if config.provider.cloudrun_audience:
+        data["provider"]["cloudrun_audience"] = config.provider.cloudrun_audience
+    if config.provider.cloudrun_impersonate_service_account:
+        data["provider"]["cloudrun_impersonate_service_account"] = (
+            config.provider.cloudrun_impersonate_service_account
+        )
     if config.provider.default_model:
         data["provider"]["default_model"] = config.provider.default_model
     if config.optimization.optimizer_model:

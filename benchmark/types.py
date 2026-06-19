@@ -17,6 +17,7 @@ class RuntimeOptions:
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
     concurrency: int = DEFAULT_CONCURRENCY
+    request_log: Optional[str] = None
 
 
 @dataclass
@@ -30,6 +31,8 @@ class QueryResult:
     censored: bool = False
     similarity: Optional[float] = None
     details: Dict[str, Any] = field(default_factory=dict)
+    scores: Optional[Dict[str, int]] = None
+    similarities: Optional[Dict[str, float]] = None
 
 
 @dataclass

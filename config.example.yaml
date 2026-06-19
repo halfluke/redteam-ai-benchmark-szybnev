@@ -5,8 +5,11 @@
 provider:
   name: ollama # ollama, lmstudio, openwebui, openrouter
   endpoint: http://localhost:11434
-  # api_key: sk-xxx           # API key (optional for openwebui, required for openrouter)
-  # api_key_env: OPENROUTER_API_KEY  # Or use env variable
+  timeout: 240  # Seconds per request attempt (raise for slow VM→host Ollama)
+  # api_key: sk-xxx           # API key (openwebui, openrouter, or Cloud Run IAM token for ollama)
+  # api_key_env: OPENROUTER_API_KEY  # Or use env variable (e.g. CLOUDRUN_ID_TOKEN)
+  # auth: cloudrun_identity  # Auto-refresh via gcloud (see configs/cloudrun_*.yaml)
+  # cloudrun_audience: https://your-service.run.app  # Optional; defaults to endpoint
   # default_model: llama3.1:8b
 
 # OpenWebUI Provider Example (uncomment to use):
@@ -46,12 +49,25 @@ optimization:
   enabled: false
   optimizer_model: llama3.3:70b
   # optimizer_endpoint: http://localhost:11434  # Optional custom endpoint
+  # optimizer_timeout: 600   # Seconds per optimizer HTTP call (LAN Ollama)
+  # optimizer_max_tokens: 1024  # Optimizer rewrite cap (3 variants in one reply)
+  trigger: keyword_zero  # keyword_zero | any_zero (multiscore: keyword==0 OR semantic==0)
   max_iterations: 3
   strategies:
     - role_playing
     - technical
     - few_shot
     - cve_framing
+
+# Keep target (+ optional local optimizer) warm during long Cloud Run / LAN runs.
+# Auto-enabled for provider.auth: cloudrun_identity (any Cloud Run model).
+# Set enabled: false to disable. With optimization, the idle model is pinged every interval.
+keepalive:
+  enabled: true
+  interval_s: 60
+  max_tokens: 16
+  prompt: "Say OK"
+  timeout_s: 90
 
 # Benchmark Settings
 questions_file: benchmark.json
@@ -60,6 +76,10 @@ rate_limit_delay: 1.5
 max_tokens: 1024
 temperature: 0.2
 concurrency: 1
+# request_log: ./results/request_log.jsonl  # Optional JSONL timing log
+
+# Preload semantic assets once in the VM:
+# uv run run_benchmark.py preload-semantic --config config.yaml
 
 # Langfuse Observability
 langfuse:

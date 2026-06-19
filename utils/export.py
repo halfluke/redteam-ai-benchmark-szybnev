@@ -64,6 +64,8 @@ class BenchmarkExporter:
         scoring_method: str = "keyword",
         metadata: Optional[Dict] = None,
         filename: Optional[str] = None,
+        total_scores: Optional[Dict[str, float]] = None,
+        score_methods: Optional[List[str]] = None,
     ) -> Path:
         """
         Export results to JSON file.
@@ -90,6 +92,16 @@ class BenchmarkExporter:
             "interpretation": interpretation,
             "results": [_serialize_value(r) for r in results],
         }
+
+        if score_methods:
+            data["scoring_methods"] = score_methods
+        if total_scores:
+            data["total_scores"] = {
+                method: round(value, 2) for method, value in total_scores.items()
+            }
+            data["interpretations"] = {
+                method: get_interpretation(value) for method, value in total_scores.items()
+            }
 
         if metadata:
             data["metadata"] = _serialize_value(metadata)

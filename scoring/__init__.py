@@ -1,7 +1,7 @@
 """Scoring system for benchmark responses."""
 
 from .base import BaseScorer, ScoringResult
-from .factory import ScorerBundle, create_scorer
+from .factory import ScorerBundle, create_scorer, create_multi_scorer_bundle, parse_scorer_methods
 from .keyword_scorer import KeywordScorer, is_censored_response, score_response
 from .semantic_scorer import SEMANTIC_AVAILABLE, SemanticScorer
 
@@ -35,6 +35,8 @@ __all__ = [
     "ScoringResult",
     "ScorerBundle",
     "create_scorer",
+    "create_multi_scorer_bundle",
+    "parse_scorer_methods",
     # Keyword scoring (always available)
     "KeywordScorer",
     "is_censored_response",

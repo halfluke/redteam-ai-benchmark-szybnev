@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     from .llm_judge import LLMJudge
+    from .semantic_scorer import SemanticScorer
     from .technical_scorer import TechnicalScorer
 
 from .base import BaseScorer, ScoringResult
@@ -184,6 +185,9 @@ def create_hybrid_scorer(
     reference_answers: Optional[Dict[int, str]] = None,
     categories: Optional[Dict[int, str]] = None,
     use_llm: bool = True,
+    *,
+    answers_file: Optional[str] = None,
+    shared_semantic: Optional["SemanticScorer"] = None,
 ) -> HybridScorer:
     """
     Factory function to create a configured HybridScorer.
@@ -202,11 +206,22 @@ def create_hybrid_scorer(
     from .llm_judge import LLMJudge
     from .technical_scorer import TechnicalScorer
 
-    # Create technical scorer
-    technical_scorer = TechnicalScorer(
-        model_name=model_name,
-        reference_answers=reference_answers,
-    )
+    if shared_semantic is not None:
+        if reference_answers is None:
+            raise ValueError("reference_answers required when shared_semantic is set")
+        technical_scorer = TechnicalScorer(
+            model_name=model_name,
+            model=shared_semantic.model,
+            reference_embeddings=shared_semantic.reference_embeddings,
+            reference_answers=reference_answers,
+        )
+        print("   ✓ Hybrid scorer reusing shared embedding model and reference cache")
+    else:
+        technical_scorer = TechnicalScorer(model_name=model_name)
+        if answers_file and technical_scorer.try_load_reference_from_cache(answers_file):
+            pass
+        elif reference_answers:
+            technical_scorer.load_reference_answers(reference_answers)
 
     # Create LLM judge if enabled
     llm_judge = None

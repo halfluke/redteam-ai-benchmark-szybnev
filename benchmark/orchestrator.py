@@ -10,7 +10,9 @@ from .runner import (
     _run_questions_concurrent,
     _run_questions_sequential,
 )
+from .scoring_summary import compute_total_scores, primary_interpretation, primary_total_score
 from .types import RuntimeOptions
+from scoring.factory import MultiScorerBundle
 
 
 @dataclass
@@ -21,6 +23,7 @@ class SingleModelBenchmarkResult:
     results: List[Dict[str, Any]]
     total_score: float
     interpretation: str
+    total_scores: Dict[str, float] = field(default_factory=dict)
     optimization_results: List[Dict[str, Any]] = field(default_factory=list)
     exported: Dict[str, str] = field(default_factory=dict)
     tracer_failed: bool = False
@@ -41,12 +44,16 @@ def run_single_model_benchmark(
     export_callback: Optional[Callable[..., Dict[str, str]]] = None,
     export_kwargs: Optional[Dict[str, Any]] = None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
+    optimization_trigger: str = "keyword_zero",
+    keepalive=None,
 ) -> SingleModelBenchmarkResult:
     """Run, score, trace, and optionally export one model benchmark."""
     scorer_func = scorer_bundle.score_func
     scorer = getattr(scorer_bundle, "scorer", None)
     scorer_details = getattr(scorer_bundle, "details", {})
     scoring_method = scorer_bundle.method_label
+    multi_scorer_bundle = scorer_bundle if isinstance(scorer_bundle, MultiScorerBundle) and scorer_bundle.is_multi else None
+    score_methods = multi_scorer_bundle.methods if multi_scorer_bundle else None
     tracer = None
     tracer_failed = False
     shutdown_requested = shutdown_requested or (lambda: False)
@@ -74,7 +81,9 @@ def run_single_model_benchmark(
             runtime,
             scorer=scorer,
             scorer_details=scorer_details,
+            multi_scorer_bundle=multi_scorer_bundle,
             shutdown_requested=shutdown_requested,
+            reference_answers=reference_answers,
         )
         optimization_results = []
     else:
@@ -89,12 +98,16 @@ def run_single_model_benchmark(
             tracer=tracer,
             scorer=scorer,
             scorer_details=scorer_details,
+            multi_scorer_bundle=multi_scorer_bundle,
             shutdown_requested=shutdown_requested,
+            optimization_trigger=optimization_trigger,
+            keepalive=keepalive,
         )
 
     interrupted = shutdown_requested()
-    total_score = sum(r["score"] for r in results) / len(results) if results else 0.0
-    interpretation = get_interpretation(total_score)
+    total_scores = compute_total_scores(results, score_methods)
+    total_score = primary_total_score(total_scores)
+    interpretation = primary_interpretation(total_scores)
 
     if tracer:
         tracer.end_benchmark(total_score, interpretation)
@@ -114,6 +127,8 @@ def run_single_model_benchmark(
             total_score=total_score,
             interpretation=interpretation,
             scoring_method=scoring_method,
+            total_scores=total_scores or None,
+            score_methods=score_methods,
             metadata=metadata or None,
             **(export_kwargs or {}),
         )
@@ -123,6 +138,7 @@ def run_single_model_benchmark(
         results=results,
         total_score=total_score,
         interpretation=interpretation,
+        total_scores=total_scores,
         optimization_results=optimization_results,
         exported=exported,
         tracer_failed=tracer_failed,

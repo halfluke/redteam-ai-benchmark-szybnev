@@ -1,20 +1,33 @@
 """LM Studio API client (OpenAI-compatible)."""
 
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import requests
 
-from .base import APIClient, RequestsRetryMixin
+from .base import APIClient, RequestsRetryMixin, connection_probe_timeout
+from .bearer_auth import BearerAuthMixin
+from .diagnostics import QueryDiagnostics
 
 
-class LMStudioClient(RequestsRetryMixin, APIClient):
+class LMStudioClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
     """LM Studio API client (OpenAI-compatible)."""
 
     provider_name = "LM Studio"
 
-    def __init__(self, base_url: str, model_name: str, timeout: int = 150):
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        timeout: int = 150,
+        api_key: Optional[str] = None,
+        auth_token_getter: Optional[Callable[[], str]] = None,
+        invalidate_auth_token: Optional[Callable[[], None]] = None,
+    ):
         super().__init__(base_url, model_name)
         self.timeout = timeout
+        self.api_key = api_key
+        self.auth_token_getter = auth_token_getter
+        self.invalidate_auth_token = invalidate_auth_token
         self.session = requests.Session()
 
     def query(
@@ -26,7 +39,7 @@ class LMStudioClient(RequestsRetryMixin, APIClient):
     ) -> str:
         """Query LM Studio API with retry logic."""
         url = f"{self.base_url}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        headers = self._auth_headers()
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -35,8 +48,22 @@ class LMStudioClient(RequestsRetryMixin, APIClient):
             "stream": False,
         }
 
+        diagnostics = QueryDiagnostics(
+            provider=self.provider_name,
+            endpoint=self.base_url,
+            model=self.model_name,
+            prompt_chars=len(prompt),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_s=self.timeout,
+        )
+        self.last_query_diagnostics = diagnostics
         data = self._post_json_with_retries(
-            url=url, headers=headers, payload=payload, retries=retries
+            url=url,
+            headers=headers,
+            payload=payload,
+            retries=retries,
+            diagnostics=diagnostics,
         )
         try:
             return data["choices"][0]["message"]["content"]
@@ -47,7 +74,9 @@ class LMStudioClient(RequestsRetryMixin, APIClient):
         """List available models from LM Studio."""
         try:
             url = f"{self.base_url}/v1/models"
-            response = self.session.get(url, timeout=5)
+            response = self.session.get(
+                url, headers=self._auth_headers(), timeout=5
+            )
             response.raise_for_status()
             data = response.json()
             return data.get("data", [])
@@ -58,7 +87,13 @@ class LMStudioClient(RequestsRetryMixin, APIClient):
         """Test LM Studio connection."""
         try:
             url = f"{self.base_url}/v1/models"
-            response = self.session.get(url, timeout=5)
+            response = self.session.get(
+                url,
+                headers=self._auth_headers(),
+                timeout=connection_probe_timeout(
+                    self.timeout, remote=self.auth_token_getter is not None
+                ),
+            )
             return response.status_code == 200
         except Exception:
             return False

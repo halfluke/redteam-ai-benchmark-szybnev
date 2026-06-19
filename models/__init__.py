@@ -1,9 +1,10 @@
 """LLM API client implementations."""
 
 import importlib.util
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import APIClient
+from .cloudrun_auth import create_cloudrun_identity_auth
 from .lmstudio import LMStudioClient
 from .ollama import OllamaClient
 from .openwebui import OpenWebUIClient
@@ -27,7 +28,31 @@ __all__ = [
     "OpenRouterClient",
     "OPENROUTER_AVAILABLE",
     "create_client",
+    "provider_auth_kwargs",
 ]
+
+
+def provider_auth_kwargs(
+    *,
+    auth: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    cloudrun_audience: Optional[str] = None,
+    cloudrun_impersonate_service_account: Optional[str] = None,
+) -> dict:
+    """Build optional auth kwargs for ``create_client`` from provider config."""
+    if auth != "cloudrun_identity":
+        return {}
+    if not endpoint:
+        raise ValueError("endpoint is required for cloudrun_identity auth")
+    audience = cloudrun_audience or endpoint
+    getter, invalidate = create_cloudrun_identity_auth(
+        audience,
+        impersonate_service_account=cloudrun_impersonate_service_account,
+    )
+    return {
+        "auth_token_getter": getter,
+        "invalidate_auth_token": invalidate,
+    }
 
 
 def create_client(
@@ -36,6 +61,8 @@ def create_client(
     model: str,
     api_key: Optional[str] = None,
     timeout: Optional[int] = None,
+    auth_token_getter: Optional[Callable[[], str]] = None,
+    invalidate_auth_token: Optional[Callable[[], None]] = None,
 ) -> APIClient:
     """
     Create appropriate API client based on provider.
@@ -64,10 +91,27 @@ def create_client(
             raise ValueError(f"Unknown provider: {provider}")
 
     # Create client
+    client_timeout = timeout if timeout is not None else 150
+    auth_kwargs = {
+        "auth_token_getter": auth_token_getter,
+        "invalidate_auth_token": invalidate_auth_token,
+    }
     if provider == "lmstudio":
-        return LMStudioClient(endpoint, model, timeout=timeout if timeout is not None else 150)
+        return LMStudioClient(
+            endpoint,
+            model,
+            timeout=client_timeout,
+            api_key=api_key,
+            **auth_kwargs,
+        )
     elif provider == "ollama":
-        return OllamaClient(endpoint, model, timeout=timeout if timeout is not None else 150)
+        return OllamaClient(
+            endpoint,
+            model,
+            timeout=client_timeout,
+            api_key=None if auth_token_getter else api_key,
+            **auth_kwargs,
+        )
     elif provider == "openwebui":
         return OpenWebUIClient(
             endpoint,

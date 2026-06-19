@@ -1,0 +1,50 @@
+# DeepHat vLLM on Cloud Run + local Windows Ollama optimizer (Qwen 2.5 7B).
+# Windows: ollama pull qwen2.5:7b
+#
+# Preflight:  ./scripts/preflight_optimize.sh deephat
+# Run:         ./scripts/run_deephat_optimize_q7_q12.sh
+
+provider:
+  name: lmstudio
+  endpoint: https://YOUR-VLLM-SERVICE-HASH.a.run.app
+  auth: cloudrun_identity
+  timeout: 600
+
+scoring:
+  methods:
+    - keyword
+    - semantic
+    - hybrid
+  semantic_model: Qwen/Qwen3-Embedding-0.6B
+  use_llm_in_gray_zone: false
+
+optimization:
+  enabled: true
+  trigger: any_zero
+  optimizer_model: "qwen2.5:7b"
+  optimizer_endpoint: http://OPTIMIZER-LAN-IP:11434
+  optimizer_timeout: 600
+  optimizer_max_tokens: 1024
+  ollama_keep_alive: 30m
+  max_iterations: 2
+
+keepalive:
+  enabled: true
+  interval_s: 60
+  max_tokens: 16
+  prompt: "Say OK"
+  timeout_s: 90
+
+export:
+  formats:
+    - json
+  output_dir: ./results
+  include_response: true
+
+questions_file: benchmark.json
+answers_file: answers_all.txt
+rate_limit_delay: 2.0
+max_tokens: 1024
+temperature: 0.2
+concurrency: 1
+request_log: ./results/request_log_deephat_optimize.jsonl

@@ -1,0 +1,43 @@
+# vLLM DeepHat on GCP Cloud Run — direct HTTPS with auto-refreshed identity tokens.
+#
+# Live service (deephat-vllm-7b-prebaked): MAX_MODEL_LEN=16384 on L4.
+# Benchmark uses max_tokens=1024 for target answers (fits in 16384 context).
+#
+# Warm up when MIN_INSTANCES=0, then benchmark:
+#   ./scripts/warmup_deephat.sh
+# Keepalive pings the Cloud Run model automatically during the run (see keepalive below).
+
+provider:
+  name: lmstudio
+  endpoint: https://YOUR-VLLM-SERVICE-HASH.a.run.app
+  auth: cloudrun_identity
+  timeout: 600
+
+scoring:
+  methods:
+    - keyword
+    - semantic
+    - hybrid
+  semantic_model: Qwen/Qwen3-Embedding-0.6B
+  use_llm_in_gray_zone: false
+
+keepalive:
+  enabled: true
+  interval_s: 60
+  max_tokens: 16
+  prompt: "Say OK"
+  timeout_s: 90
+
+export:
+  formats:
+    - json
+  output_dir: ./results
+  include_response: true
+
+questions_file: benchmark.json
+answers_file: answers_all.txt
+rate_limit_delay: 2.0
+max_tokens: 1024
+temperature: 0.2
+concurrency: 1
+request_log: ./results/request_log_deephat_cloudrun.jsonl

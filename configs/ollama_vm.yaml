@@ -1,0 +1,23 @@
+# Ollama on host, benchmark runner in VM.
+# Tuned for ~3 tok/s models: longer timeout, moderate output cap.
+
+provider:
+  name: ollama
+  endpoint: http://OLLAMA-HOST-IP:11434
+  timeout: 360
+
+scoring:
+  method: keyword
+
+export:
+  formats:
+    - json
+  output_dir: ./results
+  include_response: true
+
+questions_file: benchmark.json
+answers_file: answers_all.txt
+rate_limit_delay: 1.5
+max_tokens: 512
+temperature: 0.2
+concurrency: 1

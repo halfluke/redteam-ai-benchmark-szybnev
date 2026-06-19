@@ -370,12 +370,17 @@ $RECYCLE.BIN/
 *.db
 
 # Temp
+results/
 results_*/
 results_*.json
 optimized_*.json
+request_log*.jsonl
 
 # User config (use config.example.yaml as template)
 config.yaml
+
+# Local endpoint overrides (use scripts/local_env.sh.example as template)
+scripts/local_env.sh
 
 # End of https://www.toptal.com/developers/gitignore/api/python,venv,pycharm+all,visualstudiocode,windows,linux,macos
 

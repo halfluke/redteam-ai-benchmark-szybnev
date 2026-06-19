@@ -193,6 +193,44 @@ If Langfuse initialization fails, the benchmark should continue without tracing.
 - model list endpoint: `/api/tags`
 - native Ollama payload with options
 
+## GCP Cloud Run Benchmarks
+
+Configs: `configs/cloudrun_ollama.yaml` (Tongyi), `configs/cloudrun_vllm_deephat.yaml` (DeepHat). Deploy details live in the sibling **GCP-CLOUDRUN-AImodels** repo.
+
+**Recommended:** direct HTTPS to the Cloud Run service URL with `provider.auth: cloudrun_identity`. The benchmark calls `gcloud auth print-identity-token` and refreshes before JWT expiry (~1 h). User accounts cannot use `--audiences`; the client falls back to a plain token (works with `roles/run.invoker`). Service accounts use `--audiences=<service origin>`; optional `cloudrun_impersonate_service_account` for impersonation.
+
+Implementation: `models/cloudrun_auth.py`, `models/bearer_auth.py`; wired via `provider_auth_kwargs()` in `models/__init__.py` and `_create_configured_client()` in `run_benchmark.py`. On HTTP **401**, clients invalidate the cache and retry once (`models/base.py`).
+
+**Fallback:** local proxy (`./proxy.sh tongyi|deephat` → `:11434` / `:8080`) — set `endpoint` to localhost and omit `auth`.
+
+Cloud Run GPU services use **`MIN_INSTANCES=0`** by default. Cold start (revision boot + model load) happens on the first inference after idle. The benchmark client timeout (`provider.timeout`, **600s** in `configs/cloudrun_*.yaml` per HTTP attempt, **3** retries on timeout) applies only to each `/api/chat` or `/v1/chat/completions` call—not to local semantic scoring afterward.
+
+**Warmup and keepalive are built into `run_benchmark.py`** for `auth: cloudrun_identity` configs: synchronous warmup before Q1, then background pings every 60s on idle endpoints (target only for baseline; target + local Ollama optimizer when optimization is enabled). Target pings are plain HTTP chat (no Ollama `keep_alive`); only the local optimizer uses `optimization.ollama_keep_alive`. Full explanation: **README.md → GCP Cloud Run → Warmup and keepalive**.
+
+Manual curl warmup (optional if not using `run_benchmark.py` yet):
+
+```bash
+TOKEN=$(gcloud auth print-identity-token)
+curl -s https://YOUR-OLLAMA-SERVICE-HASH.a.run.app/api/chat \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-ollama-model-id","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":16,"temperature":0.2}}'
+```
+
+vLLM warmup example:
+
+```bash
+TOKEN=$(gcloud auth print-identity-token)
+curl -s https://YOUR-VLLM-SERVICE-HASH.a.run.app/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"YourOrg/YourModel","messages":[{"role":"user","content":"Say OK"}],"max_tokens":16,"stream":false}'
+```
+
+Without warmup (when not using built-in keepalive), Q1 can combine cold start with a full `max_tokens` generation and approach the client timeout. Cloud Run request timeout (often **3600s**) is not the usual bottleneck; `provider.timeout` is.
+
+If using the local proxy fallback, do not stop it mid-run—connection errors on later questions score **0** (see `models/base.py`: `ConnectionError` does not retry).
+
 `models/openrouter.py`:
 
 - OpenAI-compatible API

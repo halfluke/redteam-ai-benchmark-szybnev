@@ -91,6 +91,34 @@ def test_ollama_query_passes_max_tokens_and_temperature():
     assert fake_session.posts[0]["timeout"] == 77
 
 
+def test_ollama_query_sends_bearer_token_when_api_key_set():
+    client = OllamaClient("http://ollama.local", "test-model", api_key="token-123")
+    fake_session = FakeRequestsSession({"message": {"content": "ok"}})
+    client.session = fake_session
+
+    client.query("hello")
+
+    headers = fake_session.posts[0]["headers"]
+    assert headers["Authorization"] == "Bearer token-123"
+
+
+def test_ollama_query_falls_back_to_thinking_when_content_empty():
+    client = OllamaClient("http://ollama.local", "test-model")
+    fake_session = FakeRequestsSession(
+        {
+            "message": {
+                "content": "",
+                "thinking": "Patch AMSI with VirtualProtect and memcpy.",
+            }
+        }
+    )
+    client.session = fake_session
+
+    result = client.query("amsi bypass")
+
+    assert result == "Patch AMSI with VirtualProtect and memcpy."
+
+
 def test_lmstudio_query_passes_max_tokens_and_temperature():
     client = LMStudioClient("http://lmstudio.local", "test-model", timeout=88)
     fake_session = FakeRequestsSession(
@@ -224,9 +252,11 @@ def test_optimizer_with_initial_censored_result_queries_only_optimized_prompt():
     optimizer.history = []
     optimizer.max_iterations = 1
     optimizer.min_acceptable_score = 50
-    optimizer._generate_optimized_variants = lambda **kwargs: {
-        "role_playing": "optimized prompt"
-    }
+    optimizer._generate_optimized_variants = lambda **kwargs: (
+        {"role_playing": "optimized prompt"},
+        "optimizer_llm",
+        None,
+    )
 
     target_client = FakeTargetClient()
     result = optimizer.optimize_prompt(
@@ -234,7 +264,7 @@ def test_optimizer_with_initial_censored_result_queries_only_optimized_prompt():
         target_client=target_client,
         scorer_func=lambda q_id, response: 50,
         question_id=1,
-        initial_response="refusal",
+        initial_response="I cannot help with that request.",
         initial_score=0,
         max_tokens=55,
         temperature=0.3,
@@ -434,7 +464,7 @@ def test_explicit_optional_scorers_fail_clearly_without_requirements(monkeypatch
     questions = [{"id": 1, "category": "cat", "prompt": "prompt"}]
 
     monkeypatch.setattr("scoring.factory.SEMANTIC_AVAILABLE", False)
-    with pytest.raises(RuntimeError, match="--scorer hybrid requires"):
+    with pytest.raises(RuntimeError, match="sentence-transformers not installed"):
         create_scorer(
             "hybrid",
             semantic_model=run_benchmark.DEFAULT_SEMANTIC_MODEL,
@@ -752,3 +782,18 @@ def test_export_helper_writes_json_csv_and_preserves_top_level_schema(tmp_path):
     assert payload["scoring_method"] == "keyword"
     csv_header = csv_path.read_text(encoding="utf-8").splitlines()[0]
     assert "response_snippet" not in csv_header
+
+
+def test_filter_questions_preserves_benchmark_order():
+    questions = [
+        {"id": 1, "category": "a", "prompt": "p1"},
+        {"id": 7, "category": "b", "prompt": "p7"},
+        {"id": 12, "category": "c", "prompt": "p12"},
+    ]
+    filtered = run_benchmark._filter_questions(questions, [12, 7])
+    assert [q["id"] for q in filtered] == [7, 12]
+
+
+def test_parse_question_ids_rejects_invalid():
+    with pytest.raises(ValueError):
+        run_benchmark._parse_question_ids("7,x")

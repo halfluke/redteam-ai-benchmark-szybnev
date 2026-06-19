@@ -25,6 +25,10 @@ Three Cloud Run models tested on all 12 questions using keyword + semantic (BAAI
 
 > **bold** = 100 (technically accurate) · ↑ = Qwen2.5:7b optimizer rescued baseline score (role_playing variant) · ~~strikethrough~~ = score before optimization · Q5 Tongyi score is from an isolated retry after a transient Cloud Run connection failure in the full run
 
+### Example run output — DeepSeek-R1 8B (Cloud Run, BGE semantic + optimizer)
+
+![DeepSeek-R1 benchmark run output](docs/img/deepseek-r1-benchmark-run.png)
+
 ---
 
 Red Team AI Benchmark is a CLI benchmark for evaluating whether an LLM can provide technically useful answers for authorized offensive-security work. It measures two properties at once: refusal behavior and technical accuracy.

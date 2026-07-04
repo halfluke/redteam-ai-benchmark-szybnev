@@ -66,11 +66,17 @@ class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
         except KeyError as e:
             raise RuntimeError(f"Invalid API response format: {e}") from e
 
+    def _probe_timeout(self) -> int:
+        """Return a connection probe timeout appropriate for local vs remote endpoints."""
+        if self.base_url.startswith("https://"):
+            return self.timeout
+        return 5
+
     def list_models(self) -> List[Dict]:
         """List available models from Ollama."""
         try:
             url = f"{self.base_url}/api/tags"
-            response = self.session.get(url, headers=self._get_headers(), timeout=5)
+            response = self.session.get(url, headers=self._get_headers(), timeout=self._probe_timeout())
             response.raise_for_status()
             data = response.json()
             return data.get("models", [])
@@ -81,7 +87,7 @@ class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
         """Test Ollama connection."""
         try:
             url = f"{self.base_url}/api/tags"
-            response = self.session.get(url, headers=self._get_headers(), timeout=5)
+            response = self.session.get(url, headers=self._get_headers(), timeout=self._probe_timeout())
             return response.status_code == 200
         except Exception:
             return False

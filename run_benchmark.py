@@ -915,9 +915,18 @@ def cmd_run_benchmark(args):
     try:
         try:
             with install_signal_handlers() as shutdown:
+                is_remote = client.base_url.startswith("https://")
+                if is_remote:
+                    print(
+                        f"⏳ Probing {client.base_url} "
+                        f"(Cloud Run cold start can take 1–3 min, probe timeout {getattr(client, 'timeout', 150)}s)..."
+                    )
                 if not client.test_connection():
                     print(f"❌ Cannot connect to {args.provider} at {client.base_url}")
-                    print(f"   Is {args.provider} running?")
+                    if is_remote:
+                        print("   Check: gcloud auth login, correct service URL, and that the service is deployed.")
+                    else:
+                        print(f"   Is {args.provider} running?")
                     sys.exit(1)
 
                 print(f"🚀 Red Team AI Benchmark v{BENCHMARK_VERSION}")

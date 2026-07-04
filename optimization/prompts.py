@@ -221,7 +221,7 @@ class PromptOptimizer:
         optimizer_endpoint: str = "http://localhost:11434",
         max_iterations: int = 5,
         min_acceptable_score: int = 50,
-        optimizer_timeout: int = 1200,
+        optimizer_timeout: int = 600,
     ):
         self.optimizer_client = OllamaClient(optimizer_endpoint, optimizer_model, timeout=optimizer_timeout)
         self.max_iterations = max_iterations

@@ -1,0 +1,21 @@
+# Local environment overrides — copy to local_env.sh and fill in your values.
+# local_env.sh is gitignored and never committed.
+#
+# Usage:
+#   source scripts/local_env.sh
+#   ./scripts/run_tongyi_baseline.sh
+#
+# All variables are optional — unset variables fall back to the placeholders
+# in cloudrun_env.sh and optimizer_env.sh.
+
+# Cloud Run — Ollama target (Tongyi or equivalent)
+export TONGYI_ENDPOINT="https://YOUR-OLLAMA-SERVICE-HASH.a.run.app"
+export TONGYI_MODEL="your-ollama-model-id"
+
+# Cloud Run — vLLM target (DeepHat or equivalent)
+export DEEPHAT_ENDPOINT="https://YOUR-VLLM-SERVICE-HASH.a.run.app"
+export DEEPHAT_MODEL="YourOrg/YourModel"
+
+# Local Ollama optimizer (LAN host running qwen2.5:7b or similar)
+export OPTIMIZER_ENDPOINT="http://OPTIMIZER-LAN-IP:11434"
+export OPTIMIZER_MODEL="qwen2.5:7b"

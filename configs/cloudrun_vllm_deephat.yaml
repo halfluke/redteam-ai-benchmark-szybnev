@@ -1,0 +1,39 @@
+# vLLM DeepHat on GCP Cloud Run — direct HTTPS with auto-refreshed identity tokens.
+#
+# Requires: gcloud CLI logged in (gcloud auth login).
+# Tokens refresh automatically; no proxy needed.
+#
+# Warm up first when MIN_INSTANCES=0, then run:
+#   ./scripts/warmup_deephat.sh
+#   uv run run_benchmark.py run lmstudio -m <model> --config configs/cloudrun_vllm_deephat.yaml
+#
+# Override endpoint via environment:
+#   export DEEPHAT_ENDPOINT=https://your-service-hash.a.run.app
+#   source scripts/cloudrun_env.sh
+
+provider:
+  name: lmstudio
+  endpoint: https://YOUR-VLLM-SERVICE-HASH.a.run.app
+  auth: cloudrun_identity
+  timeout: 600
+
+scoring:
+  method: rubric
+
+keepalive:
+  enabled: true
+  interval_s: 60
+  max_tokens: 16
+  prompt: "Say OK"
+  timeout_s: 90
+
+export:
+  formats:
+    - json
+  output_dir: ./results
+  include_response: true
+
+rate_limit_delay: 2.0
+max_tokens: 1024
+temperature: 0.2
+concurrency: 1

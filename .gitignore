@@ -391,3 +391,10 @@ config.yaml
 
 .agents/
 skills-lock.json
+
+# Local Cloud Run endpoint overrides (contains real service URLs)
+scripts/local_env.sh
+
+# Track project scripts despite venv Scripts pattern above
+!scripts/
+!scripts/**

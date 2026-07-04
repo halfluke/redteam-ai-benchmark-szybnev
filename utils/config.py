@@ -23,6 +23,9 @@ class ProviderConfig:
     default_model: Optional[str] = None
     timeout: int = 120
     keep_alive: Optional[str] = None
+    auth: Optional[str] = None  # e.g. "cloudrun_identity"
+    cloudrun_audience: Optional[str] = None
+    cloudrun_impersonate_service_account: Optional[str] = None
 
 
 @dataclass
@@ -58,6 +61,17 @@ class OptimizationConfig:
 
 
 @dataclass
+class KeepaliveConfig:
+    """Configuration for background model keepalive pings."""
+
+    enabled: bool = True
+    interval_s: float = 60
+    max_tokens: int = 16
+    prompt: str = "Say OK"
+    timeout_s: int = 90
+
+
+@dataclass
 class LangfuseConfig:
     """Configuration for Langfuse observability."""
 
@@ -75,6 +89,8 @@ class BenchmarkConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
+    keepalive: KeepaliveConfig = field(default_factory=KeepaliveConfig)
+    keepalive_in_yaml: bool = False
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     questions_file: str = DEFAULT_QUESTIONS_FILE
     answers_file: str = DEFAULT_ANSWERS_FILE
@@ -119,6 +135,20 @@ def _dict_to_provider_config(data: Dict[str, Any]) -> ProviderConfig:
         default_model=data.get("default_model"),
         timeout=data.get("timeout", 120),
         keep_alive=data.get("keep_alive"),
+        auth=data.get("auth"),
+        cloudrun_audience=data.get("cloudrun_audience"),
+        cloudrun_impersonate_service_account=data.get("cloudrun_impersonate_service_account"),
+    )
+
+
+def _dict_to_keepalive_config(data: Dict[str, Any]) -> KeepaliveConfig:
+    """Convert dict to KeepaliveConfig."""
+    return KeepaliveConfig(
+        enabled=data.get("enabled", True),
+        interval_s=data.get("interval_s", 60),
+        max_tokens=data.get("max_tokens", 16),
+        prompt=data.get("prompt", "Say OK"),
+        timeout_s=data.get("timeout_s", 90),
     )
 
 
@@ -203,6 +233,11 @@ def load_config(config_path: str) -> BenchmarkConfig:
             ),
             timeout=provider_data.get("timeout", default_provider.timeout),
             keep_alive=provider_data.get("keep_alive", default_provider.keep_alive),
+            auth=provider_data.get("auth"),
+            cloudrun_audience=provider_data.get("cloudrun_audience"),
+            cloudrun_impersonate_service_account=provider_data.get(
+                "cloudrun_impersonate_service_account"
+            ),
         )
     else:
         provider = _dict_to_provider_config(provider_data)
@@ -212,12 +247,16 @@ def load_config(config_path: str) -> BenchmarkConfig:
     export = _dict_to_export_config(data.get("export", {}))
     optimization = _dict_to_optimization_config(data.get("optimization", {}))
     langfuse = _dict_to_langfuse_config(data.get("langfuse", {}))
+    keepalive_in_yaml = "keepalive" in data
+    keepalive = _dict_to_keepalive_config(data.get("keepalive", {}))
 
     config = BenchmarkConfig(
         provider=provider,
         scoring=scoring,
         export=export,
         optimization=optimization,
+        keepalive=keepalive,
+        keepalive_in_yaml=keepalive_in_yaml,
         langfuse=langfuse,
         questions_file=data.get("questions_file", DEFAULT_QUESTIONS_FILE),
         answers_file=data.get("answers_file", DEFAULT_ANSWERS_FILE),
@@ -251,6 +290,18 @@ def validate_config(config: BenchmarkConfig) -> None:
     if unsupported_formats:
         formatted = ", ".join(sorted(unsupported_formats))
         raise ValueError(f"Unsupported export format(s): {formatted}")
+
+    if config.provider.auth == "cloudrun_identity" and not config.provider.endpoint:
+        raise ValueError("provider.endpoint is required when auth is cloudrun_identity")
+    if config.provider.auth and config.provider.auth != "cloudrun_identity":
+        raise ValueError(f"Unsupported provider.auth: {config.provider.auth}")
+
+    if config.keepalive.interval_s <= 0:
+        raise ValueError("keepalive.interval_s must be > 0")
+    if config.keepalive.max_tokens <= 0:
+        raise ValueError("keepalive.max_tokens must be > 0")
+    if config.keepalive.timeout_s <= 0:
+        raise ValueError("keepalive.timeout_s must be > 0")
 
 
 def create_default_config(

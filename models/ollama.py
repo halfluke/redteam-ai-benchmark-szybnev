@@ -1,14 +1,15 @@
 """Ollama API client."""
 
 import os
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import requests
 
 from .base import APIClient, RequestsRetryMixin
+from .bearer_auth import BearerAuthMixin
 
 
-class OllamaClient(RequestsRetryMixin, APIClient):
+class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
     """Ollama API client."""
 
     provider_name = "Ollama"
@@ -19,20 +20,21 @@ class OllamaClient(RequestsRetryMixin, APIClient):
         model_name: str,
         timeout: int = 150,
         api_key: Optional[str] = None,
+        auth_token_getter: Optional[Callable[[], str]] = None,
+        invalidate_auth_token: Optional[Callable[[], None]] = None,
         keep_alive: Optional[str] = None,
     ):
         super().__init__(base_url, model_name)
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("OLLAMA_API_KEY")
+        self.auth_token_getter = auth_token_getter
+        self.invalidate_auth_token = invalidate_auth_token
         self.keep_alive = keep_alive or os.environ.get("OLLAMA_KEEP_ALIVE")
         self.session = requests.Session()
 
     def _get_headers(self) -> Dict[str, str]:
-        """Return Ollama headers, including optional reverse-proxy auth."""
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+        """Return Ollama headers, including optional Cloud Run / reverse-proxy auth."""
+        return self._auth_headers()
 
     def query(
         self,

@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from typing import Dict, List
 
 from pick import pick
@@ -38,13 +39,14 @@ from benchmark.types import (
     DEFAULT_RATE_LIMIT_DELAY,
     DEFAULT_TEMPERATURE,
 )
-from models import create_client
+from benchmark.keepalive import ModelKeepalive
+from models import create_client, provider_auth_kwargs
 from optimization import PromptOptimizer, save_optimization_results
 from scoring import create_scorer
 from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
-from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER
+from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, KeepaliveConfig
 from utils.export import BenchmarkExporter
 
 Langfuse = langfuse_module.Langfuse
@@ -321,27 +323,76 @@ def _ollama_keep_alive(provider, args=None, config=None) -> str | None:
 
 
 def _create_configured_client(provider, endpoint, model_name, api_key, config, args=None):
-    """Create a provider client, applying config timeout when present."""
+    """Create a provider client, applying config timeout and Cloud Run auth when present."""
     timeout = config.provider.timeout if config else None
     keep_alive = _ollama_keep_alive(provider, args, config)
-    extra_kwargs = {}
+    extra_kwargs: dict = {}
     if keep_alive is not None:
         extra_kwargs["keep_alive"] = keep_alive
-    if timeout is None:
-        return create_client(
-            provider,
-            endpoint,
-            model_name,
-            api_key,
-            **extra_kwargs,
+
+    if config and config.provider.auth:
+        auth_kwargs = provider_auth_kwargs(
+            auth=config.provider.auth,
+            endpoint=endpoint,
+            cloudrun_audience=config.provider.cloudrun_audience,
+            cloudrun_impersonate_service_account=(
+                config.provider.cloudrun_impersonate_service_account
+            ),
         )
-    return create_client(
-        provider,
-        endpoint,
-        model_name,
-        api_key,
-        timeout=timeout,
-        **extra_kwargs,
+        if auth_kwargs:
+            api_key = None
+            extra_kwargs.update(auth_kwargs)
+
+    if timeout is not None:
+        extra_kwargs["timeout"] = timeout
+
+    return create_client(provider, endpoint, model_name, api_key, **extra_kwargs)
+
+
+def _resolve_keepalive_config(config) -> KeepaliveConfig:
+    """Return keepalive settings from config or defaults."""
+    if config and getattr(config, "keepalive", None):
+        return config.keepalive
+    return KeepaliveConfig()
+
+
+def _should_run_keepalive(config, optimizer) -> bool:
+    """Whether background keepalive should run for this benchmark."""
+    keepalive_cfg = _resolve_keepalive_config(config)
+    is_cloud_run = bool(config and config.provider.auth == "cloudrun_identity")
+    keepalive_in_yaml = bool(config and getattr(config, "keepalive_in_yaml", False))
+
+    if keepalive_in_yaml and not keepalive_cfg.enabled:
+        return False
+    if is_cloud_run:
+        return True
+    if optimizer is not None:
+        return True
+    return keepalive_in_yaml and keepalive_cfg.enabled
+
+
+def _create_keepalive(client, optimizer, config) -> ModelKeepalive | None:
+    """Create keepalive for Cloud Run target and optional local optimizer."""
+    if not _should_run_keepalive(config, optimizer):
+        return None
+
+    keepalive_cfg = _resolve_keepalive_config(config)
+
+    def _on_ping(role: str, ok: bool) -> None:
+        if not ok:
+            print(f"   Keepalive ping ({role}): failed", flush=True)
+
+    endpoints = [("target", client)]
+    if optimizer is not None:
+        endpoints.append(("optimizer", optimizer.optimizer_client))
+
+    return ModelKeepalive(
+        endpoints,
+        interval_s=keepalive_cfg.interval_s,
+        prompt=keepalive_cfg.prompt,
+        max_tokens=keepalive_cfg.max_tokens,
+        timeout_s=keepalive_cfg.timeout_s,
+        on_ping=_on_ping,
     )
 
 
@@ -762,21 +813,24 @@ def cmd_interactive(args):
                             continue
 
                         try:
-                            run_result = _run_model_with_export(
-                                questions=questions,
-                                client=model_client,
-                                model_name=model_name,
-                                scorer_bundle=scorer_bundle,
-                                runtime=RuntimeOptions(**runtime.__dict__),
-                                args=args,
-                                config=config,
-                                optimizer=optimizer,
-                                reference_answers=reference_answers,
-                                langfuse_config=langfuse_config,
-                                multi_model=len(selected_model_names) > 1,
-                                dataset=dataset,
-                                shutdown_requested=shutdown.is_requested,
-                            )
+                            keepalive = _create_keepalive(model_client, optimizer, config)
+                            keepalive_ctx = keepalive if keepalive else nullcontext()
+                            with keepalive_ctx:
+                                run_result = _run_model_with_export(
+                                    questions=questions,
+                                    client=model_client,
+                                    model_name=model_name,
+                                    scorer_bundle=scorer_bundle,
+                                    runtime=RuntimeOptions(**runtime.__dict__),
+                                    args=args,
+                                    config=config,
+                                    optimizer=optimizer,
+                                    reference_answers=reference_answers,
+                                    langfuse_config=langfuse_config,
+                                    multi_model=len(selected_model_names) > 1,
+                                    dataset=dataset,
+                                    shutdown_requested=shutdown.is_requested,
+                                )
                         except RuntimeError as e:
                             print(f"   ❌ Error: {e}")
                             print(f"   Skipping remaining questions for {model_name}")
@@ -896,23 +950,33 @@ def cmd_run_benchmark(args):
                     )
 
                 optimizer = _initialize_optimizer(args, args.optimizer_endpoint or client.base_url)
+                keepalive = _create_keepalive(client, optimizer, config)
+                if keepalive:
+                    keepalive_cfg = _resolve_keepalive_config(config)
+                    roles = "target + optimizer" if optimizer else "target"
+                    print(
+                        f"✓ Model keepalive enabled ({roles}, "
+                        f"every {keepalive_cfg.interval_s:.0f}s on idle model)\n"
+                    )
                 langfuse_config = _langfuse_config_or_none(config)
 
                 try:
-                    run_result = _run_model_with_export(
-                        questions=questions,
-                        client=client,
-                        model_name=args.model,
-                        scorer_bundle=scorer_bundle,
-                        runtime=runtime,
-                        args=args,
-                        config=config,
-                        optimizer=optimizer,
-                        reference_answers=reference_answers,
-                        langfuse_config=langfuse_config,
-                        dataset=dataset,
-                        shutdown_requested=shutdown.is_requested,
-                    )
+                    keepalive_ctx = keepalive if keepalive else nullcontext()
+                    with keepalive_ctx:
+                        run_result = _run_model_with_export(
+                            questions=questions,
+                            client=client,
+                            model_name=args.model,
+                            scorer_bundle=scorer_bundle,
+                            runtime=runtime,
+                            args=args,
+                            config=config,
+                            optimizer=optimizer,
+                            reference_answers=reference_answers,
+                            langfuse_config=langfuse_config,
+                            dataset=dataset,
+                            shutdown_requested=shutdown.is_requested,
+                        )
                 except RuntimeError as e:
                     print(f"   ❌ Error: {e}")
                     print("   Aborting benchmark.")

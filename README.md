@@ -16,9 +16,10 @@ This branch extends upstream `v2` with Cloud Run authentication, background keep
 | `cloudrun_identity` auth type in provider config | ☁️ Cloud Run | YAML config gains `auth: cloudrun_identity` and optional `cloudrun_audience` / `cloudrun_impersonate_service_account` fields. Ignored when targeting local endpoints. |
 | Background keepalive (`benchmark/keepalive.py`) | ☁️ Cloud Run | Periodically pings the target model during a benchmark run so Cloud Run services do not scale to zero between questions. Configured under `keepalive:` in YAML. Has no effect unless explicitly enabled. |
 | `_probe_timeout()` on Ollama and LM Studio clients | ☁️ Cloud Run | Uses a 5-second timeout for local HTTP endpoints and the full configured `timeout` for HTTPS/Cloud Run endpoints when testing connectivity. Prevents false-negative "cannot connect" errors on cold-start services. |
-| Cloud Run example configs (`configs/`) | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml` and `configs/cloudrun_vllm_deephat.yaml` show a full working setup with auth, keepalive, rubric scoring, and a 600-second timeout for cold-start tolerance. |
-| Helper scripts (`scripts/`) | ☁️ Cloud Run | Shell scripts for sourcing Cloud Run environment variables, warming up services, and running the benchmark without typing long flags. Includes `local_env.sh.example` for local overrides. |
-| Optimization trigger/acceptance threshold: `0%`/`50%` → `<33%`/`>=33%` | ✅ General | Optimization now fires whenever the baseline score is below 33% (not only on fully censored 0% responses), and an optimization attempt is accepted once it reaches 33% or higher. Trigger and acceptance thresholds are intentionally the same value, so any question that triggers optimization is considered fixed as soon as it clears the bar that caused it to trigger. |
+| Cloud Run example configs (`configs/`) | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml`, `configs/cloudrun_vllm_deephat.yaml`, and `configs/cloudrun_ollama_bugtrace.yaml` (4096 max tokens) show working setups with auth, keepalive, and rubric scoring. |
+| Helper scripts (`scripts/`) | ☁️ Cloud Run | Shell scripts for sourcing Cloud Run environment variables, warming up services, and running benchmarks (`warmup_*`, `run_*_baseline.sh`). Includes `local_env.sh.example` for local endpoint overrides (gitignored). |
+| Optimization trigger threshold: `0% → <25%` | ✅ General | Optimization now fires whenever the baseline score is below 25% rather than only on fully censored (0%) responses. Catches low-quality but non-refused answers. |
+| Optimization acceptance threshold: `>= 50%` | ✅ General | An optimization attempt is accepted once the reframed prompt scores 50% or higher and the response is not censored. |
 | Per-question score and response snippet | ✅ General | After each question the runner prints the score and the first 120 characters of the response on one line, giving real-time feedback during a long run. |
 | 4-strategy round-robin optimizer | ✅ General | Each optimization attempt uses the next strategy in a fixed cycle — `role_playing → technical → few_shot → cve_framing` — instead of always picking between two based on whether the response was censored. Default maximum attempts changed from 5 to 4 (one per strategy). |
 | Verbose optimization output | ✅ General | After each attempt the optimizer prints the reframed prompt snippet, the model's response snippet, and the resulting score, making it easy to see which strategy is working. |
@@ -37,6 +38,13 @@ uv run run_benchmark.py run lmstudio \
 ```
 
 To keep a Cloud Run service warm during the run, add `keepalive: enabled: true` to your YAML config. See `configs/cloudrun_ollama.yaml` for a complete example.
+
+BugTrace Apex 26B Q4 (Ollama on Cloud Run, `max_tokens=4096`):
+
+```bash
+source scripts/local_env.sh          # optional: set BUGTRACE_ENDPOINT / BUGTRACE_MODEL
+./scripts/run_bugtrace_baseline.sh
+```
 
 ---
 

@@ -16,6 +16,10 @@ export TONGYI_MODEL="your-ollama-model-id"
 export DEEPHAT_ENDPOINT="https://YOUR-VLLM-SERVICE-HASH.a.run.app"
 export DEEPHAT_MODEL="YourOrg/YourModel"
 
+# Cloud Run — Ollama target (BugTrace Apex 26B Q4)
+export BUGTRACE_ENDPOINT="https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app"
+export BUGTRACE_MODEL="hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest"
+
 # Local Ollama optimizer (LAN host running qwen2.5:7b or similar)
 export OPTIMIZER_ENDPOINT="http://OPTIMIZER-LAN-IP:11434"
 export OPTIMIZER_MODEL="qwen2.5:7b"

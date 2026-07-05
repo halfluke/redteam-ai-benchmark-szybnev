@@ -7,6 +7,9 @@ TONGYI_MODEL="${TONGYI_MODEL:-your-ollama-model-id}"
 DEEPHAT_ENDPOINT="${DEEPHAT_ENDPOINT:-https://YOUR-VLLM-SERVICE-HASH.a.run.app}"
 DEEPHAT_MODEL="${DEEPHAT_MODEL:-YourOrg/YourModel}"
 
+BUGTRACE_ENDPOINT="${BUGTRACE_ENDPOINT:-https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app}"
+BUGTRACE_MODEL="${BUGTRACE_MODEL:-hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest}"
+
 # Ping settings for keepalive / warmup scripts.
 # OLLAMA_KEEP_ALIVE is used only for local optimizer warmup (not Cloud Run target).
 PING_PROMPT="${PING_PROMPT:-Say OK}"

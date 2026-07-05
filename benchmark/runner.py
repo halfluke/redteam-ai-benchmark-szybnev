@@ -10,7 +10,7 @@ from utils.request_log import append_request_log
 from .shutdown import GracefulShutdown
 from .types import QueryResult, QuestionResult, RuntimeOptions
 
-OPTIMIZATION_TRIGGER_THRESHOLD = 33
+OPTIMIZATION_TRIGGER_THRESHOLD = 25
 
 
 def _sleep_between_requests(rate_limit_delay: float) -> None:

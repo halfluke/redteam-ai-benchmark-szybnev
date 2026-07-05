@@ -378,6 +378,7 @@ optimized_*.json
 full_*.json
 v2*_full_*.json
 judge_results_v2/
+results/
 .tmp/
 
 # Remote/runtime artifacts

@@ -18,6 +18,10 @@ provider:
   endpoint: https://YOUR-OLLAMA-SERVICE-HASH.a.run.app
   auth: cloudrun_identity
   timeout: 600
+  # Sent on every request (main query + keepalive ping): tells the Ollama
+  # server on Cloud Run to never evict the model from VRAM while the
+  # container is alive, independent of how often keepalive pings land.
+  keep_alive: -1
 
 scoring:
   method: rubric
@@ -27,7 +31,17 @@ keepalive:
   interval_s: 60
   max_tokens: 16
   prompt: "Say OK"
-  timeout_s: 90
+  timeout_s: 180
+
+# Estimate only (see utils/cloudrun_cost.py) -- matches deploy-tongyi.sh's
+# defaults (8 CPU, 32Gi memory, 1x L4, --no-gpu-zonal-redundancy). Update if
+# you deployed with different MEMORY/CPU overrides.
+cloudrun_cost:
+  enabled: true
+  gpu_type: nvidia-l4
+  gpu_zonal_redundancy: false
+  cpu: 8
+  memory_gib: 32
 
 export:
   formats:
@@ -36,6 +50,6 @@ export:
   include_response: true
 
 rate_limit_delay: 2.0
-max_tokens: 1024
+max_tokens: 4096
 temperature: 0.2
 concurrency: 1

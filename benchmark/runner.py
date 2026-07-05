@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from scoring.base import ScoringResult
 from utils.request_log import append_request_log
 
+from .keepalive import keepalive_busy
 from .shutdown import GracefulShutdown
 from .types import QueryResult, QuestionResult, RuntimeOptions
 
@@ -94,14 +95,16 @@ def _query_and_score(
     runtime: RuntimeOptions,
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
+    keepalive=None,
 ) -> Dict[str, Any]:
     """Query a model for one question and score the response."""
     start_time = time.time()
-    response = client.query(
-        q["prompt"],
-        max_tokens=runtime.max_tokens,
-        temperature=runtime.temperature,
-    )
+    with keepalive_busy(keepalive, "target"):
+        response = client.query(
+            q["prompt"],
+            max_tokens=runtime.max_tokens,
+            temperature=runtime.temperature,
+        )
     latency_ms = (time.time() - start_time) * 1000
     scoring = _with_default_details(
         _score_response(scorer_func, scorer, q["id"], response), scorer_details
@@ -194,6 +197,7 @@ def _run_questions_sequential(
                 runtime,
                 scorer=scorer,
                 scorer_details=scorer_details,
+                keepalive=keepalive,
             )
         except GracefulShutdown:
             print("  ⚠️  Graceful shutdown during model query.")

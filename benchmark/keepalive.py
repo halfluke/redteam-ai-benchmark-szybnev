@@ -139,6 +139,10 @@ class ModelKeepalive:
         return {name for name, _ in self._endpoints if name not in busy}
 
     def ping_role(self, role: str) -> bool:
+        with self._lock:
+            if role in self._busy:
+                return True
+
         client = self._client_for(role)
         if client is None:
             return False
@@ -152,6 +156,10 @@ class ModelKeepalive:
             timeout_s=self.timeout_s,
             keep_alive=keep_alive,
         )
+        if not ok:
+            with self._lock:
+                if role in self._busy:
+                    return False
         if self._on_ping:
             self._on_ping(role, ok)
         return ok

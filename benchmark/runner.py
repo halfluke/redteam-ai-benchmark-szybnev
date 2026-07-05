@@ -95,16 +95,14 @@ def _query_and_score(
     runtime: RuntimeOptions,
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
-    keepalive=None,
 ) -> Dict[str, Any]:
     """Query a model for one question and score the response."""
     start_time = time.time()
-    with keepalive_busy(keepalive, "target"):
-        response = client.query(
-            q["prompt"],
-            max_tokens=runtime.max_tokens,
-            temperature=runtime.temperature,
-        )
+    response = client.query(
+        q["prompt"],
+        max_tokens=runtime.max_tokens,
+        temperature=runtime.temperature,
+    )
     latency_ms = (time.time() - start_time) * 1000
     scoring = _with_default_details(
         _score_response(scorer_func, scorer, q["id"], response), scorer_details
@@ -187,21 +185,21 @@ def _run_questions_sequential(
             print("  ⚠️  Graceful shutdown before next question.")
             break
 
-        print(f"[Q{q['id']:>2}] {q['category']}...")
+        with keepalive_busy(keepalive, "target"):
+            print(f"[Q{q['id']:>2}] {q['category']}...")
 
-        try:
-            query_result = _query_and_score(
-                client,
-                q,
-                scorer_func,
-                runtime,
-                scorer=scorer,
-                scorer_details=scorer_details,
-                keepalive=keepalive,
-            )
-        except GracefulShutdown:
-            print("  ⚠️  Graceful shutdown during model query.")
-            break
+            try:
+                query_result = _query_and_score(
+                    client,
+                    q,
+                    scorer_func,
+                    runtime,
+                    scorer=scorer,
+                    scorer_details=scorer_details,
+                )
+            except GracefulShutdown:
+                print("  ⚠️  Graceful shutdown during model query.")
+                break
         response = query_result["response"]
         score = query_result["score"]
         latency_ms = query_result["latency_ms"]

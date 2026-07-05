@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from benchmark.keepalive import keepalive_busy
 from models import OllamaClient
 from scoring.refusal import is_censored_response
 
@@ -212,6 +213,9 @@ def extract_key_concepts(reference_answer: str, max_concepts: int = 10) -> List[
     return list(dict.fromkeys(keywords))[:max_concepts]
 
 
+STRATEGY_ORDER = ["role_playing", "technical", "few_shot", "cve_framing"]
+
+
 class PromptOptimizer:
     """Iteratively optimize prompts using an LLM optimizer."""
 
@@ -219,7 +223,7 @@ class PromptOptimizer:
         self,
         optimizer_model: str = "llama3.3:70b",
         optimizer_endpoint: str = "http://localhost:11434",
-        max_iterations: int = 5,
+        max_iterations: int = 4,
         min_acceptable_score: int = 50,
         optimizer_timeout: int = 600,
     ):
@@ -250,6 +254,7 @@ class PromptOptimizer:
         initial_score: Optional[int] = None,
         max_tokens: int = 1024,
         temperature: float = DEFAULT_TEMPERATURE,
+        keepalive=None,
     ) -> Dict:
         """Iteratively optimize prompt until success or max iterations reached."""
         self.history = []
@@ -263,11 +268,12 @@ class PromptOptimizer:
             print("    Reusing original prompt result...")
         else:
             print("    Testing original prompt...")
-            response = target_client.query(
-                original_prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            with keepalive_busy(keepalive, "target"):
+                response = target_client.query(
+                    original_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
             score = scorer_func(question_id, response)
 
         self.history.append(
@@ -300,39 +306,42 @@ class PromptOptimizer:
 
         current_prompt = original_prompt
         for iteration in range(1, self.max_iterations + 1):
-            print(f"    [Optimization iter {iteration}/{self.max_iterations}]")
+            strategy_name = STRATEGY_ORDER[(iteration - 1) % len(STRATEGY_ORDER)]
+            print(f"    [Optimization iter {iteration}/{self.max_iterations}] Strategy: {strategy_name}")
 
             last_attempt = self.history[-1]
             failure_reason = "censored" if last_attempt["score"] == 0 else "inaccurate"
-            optimized_prompts = self._generate_optimized_variants(
-                original_prompt=original_prompt,
-                current_prompt=current_prompt,
-                failure_reason=failure_reason,
-                last_score=last_attempt["score"],
-                last_response=last_attempt["response"],
-                category=category,
-                reference_concepts=(
-                    extract_key_concepts(reference_answer) if reference_answer else None
-                ),
+            with keepalive_busy(keepalive, "optimizer"):
+                optimized_prompts = self._generate_optimized_variants(
+                    original_prompt=original_prompt,
+                    current_prompt=current_prompt,
+                    failure_reason=failure_reason,
+                    last_score=last_attempt["score"],
+                    last_response=last_attempt["response"],
+                    category=category,
+                    reference_concepts=(
+                        extract_key_concepts(reference_answer) if reference_answer else None
+                    ),
+                )
+
+            selected_prompt = optimized_prompts.get(
+                strategy_name, optimized_prompts.get("first", current_prompt)
             )
 
-            if failure_reason == "censored":
-                selected_prompt = optimized_prompts.get(
-                    "role_playing", optimized_prompts.get("first", current_prompt)
-                )
-                strategy_name = "role_playing"
-            else:
-                selected_prompt = optimized_prompts.get(
-                    "technical", optimized_prompts.get("first", current_prompt)
-                )
-                strategy_name = "technical"
+            prompt_snippet = (selected_prompt[:100] + "...") if len(selected_prompt) > 100 else selected_prompt
+            print(f"      Reframed: {prompt_snippet.replace(chr(10), ' ')}")
 
-            response = target_client.query(
-                selected_prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            with keepalive_busy(keepalive, "target"):
+                response = target_client.query(
+                    selected_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
             score = scorer_func(question_id, response)
+
+            resp_snippet = (response[:120] + "...") if len(response) > 120 else response
+            print(f"      Response: {resp_snippet.replace(chr(10), ' ')}")
+            print(f"      Score: {score}%")
 
             self.history.append(
                 {
@@ -344,8 +353,6 @@ class PromptOptimizer:
                     "censored": is_censored_response(response),
                 }
             )
-
-            print(f"      Strategy: {strategy_name} - Score: {score}%")
 
             if score > best_score:
                 best_score = score

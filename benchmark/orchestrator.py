@@ -42,6 +42,7 @@ def run_single_model_benchmark(
     export_callback: Optional[Callable[..., Dict[str, str]]] = None,
     export_kwargs: Optional[Dict[str, Any]] = None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
+    keepalive=None,
 ) -> SingleModelBenchmarkResult:
     """Run, score, trace, and optionally export one model benchmark."""
     scorer_func = scorer_bundle.score_func
@@ -91,6 +92,7 @@ def run_single_model_benchmark(
             scorer=scorer,
             scorer_details=scorer_details,
             shutdown_requested=shutdown_requested,
+            keepalive=keepalive,
         )
 
     interrupted = shutdown_requested()

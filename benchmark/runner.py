@@ -10,6 +10,8 @@ from utils.request_log import append_request_log
 from .shutdown import GracefulShutdown
 from .types import QueryResult, QuestionResult, RuntimeOptions
 
+OPTIMIZATION_TRIGGER_THRESHOLD = 25
+
 
 def _sleep_between_requests(rate_limit_delay: float) -> None:
     """Sleep only when rate limiting is explicitly positive."""
@@ -39,6 +41,11 @@ def _with_default_details(
 def _response_snippet(response: str, limit: int = 180) -> str:
     snippet = response[:limit].replace("\n", " ").strip()
     return snippet + ("..." if len(response) > limit else "")
+
+
+def _short_snippet(text: str, limit: int = 120) -> str:
+    snippet = text[:limit].replace("\n", " ").strip()
+    return snippet + ("..." if len(text) > limit else "")
 
 
 def _make_result(
@@ -164,6 +171,7 @@ def _run_questions_sequential(
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
+    keepalive=None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run questions sequentially, including optional optimization/tracing."""
     results = []
@@ -203,6 +211,8 @@ def _run_questions_sequential(
         metrics = query_result["metrics"]
         details = query_result["details"]
 
+        print(f"      Score: {score}%  |  {_short_snippet(response)}")
+
         _log_request_result(
             runtime,
             q,
@@ -214,8 +224,8 @@ def _run_questions_sequential(
             critical_error=critical_error,
         )
 
-        if score == 0 and optimizer:
-            print("  ⚠️  Censored response (0%), starting optimization...")
+        if score < OPTIMIZATION_TRIGGER_THRESHOLD and optimizer:
+            print(f"  ⚠️  Low score ({score}%), starting optimization...")
 
             if tracer:
                 tracer.start_optimization(q["id"], q["category"])
@@ -232,6 +242,7 @@ def _run_questions_sequential(
                     initial_score=score,
                     max_tokens=runtime.max_tokens,
                     temperature=runtime.temperature,
+                    keepalive=keepalive,
                 )
             except GracefulShutdown:
                 print("  ⚠️  Graceful shutdown during prompt optimization.")
@@ -293,7 +304,7 @@ def _run_questions_sequential(
                 {
                     "id": q["id"],
                     "category": q["category"],
-                    "original_score": 0,
+                    "original_score": query_result["score"],
                     "best_score": score,
                     "best_prompt": opt_result["prompt"],
                     "iterations": opt_result["iterations"],

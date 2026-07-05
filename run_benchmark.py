@@ -631,6 +631,7 @@ def _run_model_with_export(
     multi_model=False,
     dataset=None,
     shutdown_requested=None,
+    keepalive=None,
 ):
     return run_single_model_benchmark(
         questions=questions,
@@ -651,6 +652,7 @@ def _run_model_with_export(
             "runtime": runtime,
         },
         shutdown_requested=shutdown_requested,
+        keepalive=keepalive,
     )
 
 
@@ -830,6 +832,7 @@ def cmd_interactive(args):
                                     multi_model=len(selected_model_names) > 1,
                                     dataset=dataset,
                                     shutdown_requested=shutdown.is_requested,
+                                    keepalive=keepalive,
                                 )
                         except RuntimeError as e:
                             print(f"   ❌ Error: {e}")
@@ -985,6 +988,7 @@ def cmd_run_benchmark(args):
                             langfuse_config=langfuse_config,
                             dataset=dataset,
                             shutdown_requested=shutdown.is_requested,
+                            keepalive=keepalive,
                         )
                 except RuntimeError as e:
                     print(f"   ❌ Error: {e}")

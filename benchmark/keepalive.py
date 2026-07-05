@@ -174,9 +174,10 @@ class ModelKeepalive:
     def start(self) -> None:
         """Warm up all models and start the background keepalive loop."""
         warmup = self.warmup()
-        for role, ok in warmup.items():
-            status = "ok" if ok else "failed"
-            print(f"   Keepalive warmup ({role}): {status}")
+        if not self._on_ping:
+            for role, ok in warmup.items():
+                status = "ok" if ok else "failed"
+                print(f"   Keepalive warmup ({role}): {status}")
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop,

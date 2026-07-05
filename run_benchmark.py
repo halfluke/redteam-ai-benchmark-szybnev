@@ -1120,8 +1120,8 @@ def _add_optimization_args(parser):
     parser.add_argument(
         "--max-optimization-iterations",
         type=int,
-        default=5,
-        help="Maximum optimization iterations per question (default: 5)",
+        default=4,
+        help="Maximum optimization iterations per question (default: 4, one per strategy)",
     )
 
 

@@ -4,6 +4,42 @@
 
 Red Team AI Benchmark is a CLI benchmark for choosing base LLMs for authorized red-team and offensive-security work. Version 2 uses a rubric-based dataset instead of judging answers only against one golden response.
 
+---
+
+## Branch: `feature/cloudrun-v2`
+
+This branch extends upstream `v2` with Cloud Run authentication, background keepalive, and several optimizer improvements. Changes are listed below with a tag indicating whether each one is **Cloud Run specific** or a **general improvement** that could benefit any deployment.
+
+| Change | Tag | Description |
+| --- | --- | --- |
+| GCP Cloud Run auth (`cloudrun_auth.py`, `bearer_auth.py`) | ☁️ Cloud Run | Fetches and auto-refreshes GCP identity tokens via `gcloud auth print-identity-token`. Injected as a Bearer header into Ollama and LM Studio clients through `BearerAuthMixin`. No impact on local HTTP endpoints. |
+| `cloudrun_identity` auth type in provider config | ☁️ Cloud Run | YAML config gains `auth: cloudrun_identity` and optional `cloudrun_audience` / `cloudrun_impersonate_service_account` fields. Ignored when targeting local endpoints. |
+| Background keepalive (`benchmark/keepalive.py`) | ☁️ Cloud Run | Periodically pings the target model during a benchmark run so Cloud Run services do not scale to zero between questions. Configured under `keepalive:` in YAML. Has no effect unless explicitly enabled. |
+| `_probe_timeout()` on Ollama and LM Studio clients | ☁️ Cloud Run | Uses a 5-second timeout for local HTTP endpoints and the full configured `timeout` for HTTPS/Cloud Run endpoints when testing connectivity. Prevents false-negative "cannot connect" errors on cold-start services. |
+| Cloud Run example configs (`configs/`) | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml` and `configs/cloudrun_vllm_deephat.yaml` show a full working setup with auth, keepalive, rubric scoring, and a 600-second timeout for cold-start tolerance. |
+| Helper scripts (`scripts/`) | ☁️ Cloud Run | Shell scripts for sourcing Cloud Run environment variables, warming up services, and running the benchmark without typing long flags. Includes `local_env.sh.example` for local overrides. |
+| Optimization trigger threshold: `0% → <25%` | ✅ General | Optimization now fires whenever the baseline score is below 25% rather than only on fully censored (0%) responses. Catches low-quality but non-refused answers. |
+| Per-question score and response snippet | ✅ General | After each question the runner prints the score and the first 120 characters of the response on one line, giving real-time feedback during a long run. |
+| 4-strategy round-robin optimizer | ✅ General | Each optimization attempt uses the next strategy in a fixed cycle — `role_playing → technical → few_shot → cve_framing` — instead of always picking between two based on whether the response was censored. Default maximum attempts changed from 5 to 4 (one per strategy). |
+| Verbose optimization output | ✅ General | After each attempt the optimizer prints the reframed prompt snippet, the model's response snippet, and the resulting score, making it easy to see which strategy is working. |
+| Keepalive correctness during optimization | ☁️ Cloud Run | `optimize_prompt()` gains a `keepalive` parameter. The target and optimizer LLM calls are wrapped with `keepalive_busy()` so the keepalive thread stops pinging while those calls are in flight, preventing spurious timeout warnings and keeping the model warm between attempts. |
+
+### Running on Cloud Run
+
+Source your environment and run:
+
+```bash
+source scripts/cloudrun_env.sh        # set CLOUDRUN_ENDPOINT, TOKEN, etc.
+uv run run_benchmark.py run lmstudio \
+  -m "DeepHat/DeepHat-V1-7B" \
+  -e "$CLOUDRUN_ENDPOINT" \
+  --config configs/cloudrun_vllm_deephat.yaml
+```
+
+To keep a Cloud Run service warm during the run, add `keepalive: enabled: true` to your YAML config. See `configs/cloudrun_ollama.yaml` for a complete example.
+
+---
+
 The default v2 suite contains 60 questions in `datasets/v2/benchmark.jsonl`, grouped by domain and difficulty.
 
 ## v2 Local Leaderboard

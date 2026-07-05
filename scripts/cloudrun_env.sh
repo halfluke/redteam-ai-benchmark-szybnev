@@ -1,5 +1,12 @@
+#!/usr/bin/env bash
 # Cloud Run target endpoints (match configs/cloudrun_*.yaml).
-# Source: source "$(dirname "$0")/cloudrun_env.sh"
+# Usage: source scripts/cloudrun_env.sh
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  echo "Source this file; do not execute it directly:" >&2
+  echo "  source scripts/cloudrun_env.sh" >&2
+  exit 1
+fi
 
 TONGYI_ENDPOINT="${TONGYI_ENDPOINT:-https://YOUR-OLLAMA-SERVICE-HASH.a.run.app}"
 TONGYI_MODEL="${TONGYI_MODEL:-your-ollama-model-id}"

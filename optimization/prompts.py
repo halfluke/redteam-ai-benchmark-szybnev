@@ -258,7 +258,12 @@ class PromptOptimizer:
     ) -> Dict:
         """Iteratively optimize prompt until success or max iterations reached."""
         self.history = []
-        best_score = 0
+        # -1 sentinel (not 0): ensures the very first attempt's response is
+        # always captured as the initial "best", even when it scores exactly
+        # 0%. Otherwise, if every attempt in this run scores 0%, `score >
+        # best_score` never fires and the real generated text is discarded in
+        # favor of this empty placeholder.
+        best_score = -1
         best_prompt = original_prompt
         best_response = ""
 

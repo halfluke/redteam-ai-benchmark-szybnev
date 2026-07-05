@@ -379,8 +379,8 @@ def _create_keepalive(client, optimizer, config) -> ModelKeepalive | None:
     keepalive_cfg = _resolve_keepalive_config(config)
 
     def _on_ping(role: str, ok: bool) -> None:
-        status = "ok" if ok else "failed"
-        print(f"   Keepalive ping ({role}): {status}", flush=True)
+        if not ok:
+            print(f"   Keepalive ping ({role}): failed", flush=True)
 
     endpoints = [("target", client)]
     if optimizer is not None:

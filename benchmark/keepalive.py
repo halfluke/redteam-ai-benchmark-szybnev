@@ -138,7 +138,7 @@ class ModelKeepalive:
             busy = set(self._busy)
         return {name for name, _ in self._endpoints if name not in busy}
 
-    def ping_role(self, role: str) -> bool:
+    def ping_role(self, role: str, *, report: bool = True) -> bool:
         with self._lock:
             if role in self._busy:
                 return True
@@ -160,7 +160,7 @@ class ModelKeepalive:
             with self._lock:
                 if role in self._busy:
                     return False
-        if self._on_ping:
+        if report and self._on_ping:
             self._on_ping(role, ok)
         return ok
 
@@ -168,7 +168,7 @@ class ModelKeepalive:
         """Synchronously ping every endpoint once before the benchmark starts."""
         results = {}
         for role, _ in self._endpoints:
-            results[role] = self.ping_role(role)
+            results[role] = self.ping_role(role, report=False)
         return results
 
     def ping_idle_endpoints(self) -> Dict[str, bool]:

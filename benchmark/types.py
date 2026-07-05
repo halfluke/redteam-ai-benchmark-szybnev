@@ -62,6 +62,7 @@ class QuestionResult:
     capability: Optional[str] = None
     weight: float = 1.0
     details: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the backward-compatible export shape."""
@@ -87,6 +88,8 @@ class QuestionResult:
         }
         if self.similarity is not None:
             result["similarity"] = self.similarity
+        if self.error is not None:
+            result["error"] = self.error
         return result
 
 

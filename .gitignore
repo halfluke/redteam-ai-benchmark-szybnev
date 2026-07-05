@@ -379,6 +379,7 @@ full_*.json
 v2*_full_*.json
 judge_results_v2/
 results/
+request_log*.jsonl
 .tmp/
 
 # Remote/runtime artifacts

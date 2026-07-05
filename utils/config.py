@@ -72,6 +72,22 @@ class KeepaliveConfig:
 
 
 @dataclass
+class CloudRunCostConfig:
+    """Configuration for the optional estimated Cloud Run cost printed at run end.
+
+    This is an estimate derived from published on-demand instance-based-billing
+    rates (CPU/memory/GPU per-second) multiplied by observed instance uptime,
+    not the authoritative GCP invoice. See utils/cloudrun_cost.py.
+    """
+
+    enabled: bool = False
+    gpu_type: Optional[str] = "nvidia-l4"
+    gpu_zonal_redundancy: bool = False
+    cpu: float = 8
+    memory_gib: float = 32
+
+
+@dataclass
 class LangfuseConfig:
     """Configuration for Langfuse observability."""
 
@@ -91,6 +107,7 @@ class BenchmarkConfig:
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     keepalive: KeepaliveConfig = field(default_factory=KeepaliveConfig)
     keepalive_in_yaml: bool = False
+    cloudrun_cost: CloudRunCostConfig = field(default_factory=CloudRunCostConfig)
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     questions_file: str = DEFAULT_QUESTIONS_FILE
     answers_file: str = DEFAULT_ANSWERS_FILE
@@ -149,6 +166,17 @@ def _dict_to_keepalive_config(data: Dict[str, Any]) -> KeepaliveConfig:
         max_tokens=data.get("max_tokens", 16),
         prompt=data.get("prompt", "Say OK"),
         timeout_s=data.get("timeout_s", 90),
+    )
+
+
+def _dict_to_cloudrun_cost_config(data: Dict[str, Any]) -> CloudRunCostConfig:
+    """Convert dict to CloudRunCostConfig."""
+    return CloudRunCostConfig(
+        enabled=data.get("enabled", False),
+        gpu_type=data.get("gpu_type", "nvidia-l4"),
+        gpu_zonal_redundancy=data.get("gpu_zonal_redundancy", False),
+        cpu=data.get("cpu", 8),
+        memory_gib=data.get("memory_gib", 32),
     )
 
 
@@ -249,6 +277,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
     langfuse = _dict_to_langfuse_config(data.get("langfuse", {}))
     keepalive_in_yaml = "keepalive" in data
     keepalive = _dict_to_keepalive_config(data.get("keepalive", {}))
+    cloudrun_cost = _dict_to_cloudrun_cost_config(data.get("cloudrun_cost", {}))
 
     config = BenchmarkConfig(
         provider=provider,
@@ -257,6 +286,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
         optimization=optimization,
         keepalive=keepalive,
         keepalive_in_yaml=keepalive_in_yaml,
+        cloudrun_cost=cloudrun_cost,
         langfuse=langfuse,
         questions_file=data.get("questions_file", DEFAULT_QUESTIONS_FILE),
         answers_file=data.get("answers_file", DEFAULT_ANSWERS_FILE),
@@ -302,6 +332,19 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("keepalive.max_tokens must be > 0")
     if config.keepalive.timeout_s <= 0:
         raise ValueError("keepalive.timeout_s must be > 0")
+
+    if config.cloudrun_cost.enabled:
+        if config.cloudrun_cost.cpu <= 0:
+            raise ValueError("cloudrun_cost.cpu must be > 0")
+        if config.cloudrun_cost.memory_gib <= 0:
+            raise ValueError("cloudrun_cost.memory_gib must be > 0")
+        if config.cloudrun_cost.gpu_type:
+            from utils.cloudrun_cost import gpu_per_second_rate
+
+            gpu_per_second_rate(
+                config.cloudrun_cost.gpu_type,
+                config.cloudrun_cost.gpu_zonal_redundancy,
+            )
 
 
 def create_default_config(

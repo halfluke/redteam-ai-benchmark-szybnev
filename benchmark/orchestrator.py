@@ -77,6 +77,7 @@ def run_single_model_benchmark(
             scorer=scorer,
             scorer_details=scorer_details,
             shutdown_requested=shutdown_requested,
+            model_name=model_name,
         )
         optimization_results = []
     else:

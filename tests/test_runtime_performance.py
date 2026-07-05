@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 import run_benchmark
 from models.lmstudio import LMStudioClient
@@ -43,6 +44,30 @@ class FakeRequestsSession:
 
     def close(self):
         self.closed = True
+
+
+class SequencedResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self.payload = payload or {}
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(response=self)
+
+    def json(self):
+        return self.payload
+
+
+class SequencedSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.posts = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.posts.append({"url": url, "json": json})
+        return self.responses.pop(0)
 
 
 def test_sleep_between_requests_skips_zero_delay(monkeypatch):
@@ -118,6 +143,34 @@ def test_ollama_auth_keep_alive_and_thinking_fallback():
         call["headers"]["Authorization"] == "Bearer token-123"
         for call in fake_session.gets
     )
+
+
+def test_ollama_retries_on_server_error_then_succeeds(monkeypatch):
+    client = OllamaClient("http://ollama.local", "test-model")
+    client.session = SequencedSession([
+        SequencedResponse(500, text="boom"),
+        SequencedResponse(200, payload={"message": {"content": "ok"}}),
+    ])
+    monkeypatch.setattr("models.base.time.sleep", lambda delay: None)
+
+    result = client.query("hello", retries=3)
+
+    assert result == "ok"
+    assert len(client.session.posts) == 2
+
+
+def test_ollama_raises_after_exhausting_retries_on_server_error(monkeypatch):
+    client = OllamaClient("http://ollama.local", "test-model")
+    client.session = SequencedSession([
+        SequencedResponse(500, text="boom"),
+        SequencedResponse(500, text="boom"),
+    ])
+    monkeypatch.setattr("models.base.time.sleep", lambda delay: None)
+
+    with pytest.raises(RuntimeError, match="API error 500"):
+        client.query("hello", retries=2)
+
+    assert len(client.session.posts) == 2
 
 
 def test_ollama_empty_content_and_no_thinking_returns_empty_string():
@@ -376,6 +429,67 @@ def test_sequential_runner_returns_partial_results_on_graceful_shutdown(monkeypa
     assert [result["id"] for result in results] == [1]
 
 
+def test_sequential_runner_skips_question_on_runtime_error(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        def query(self, prompt, max_tokens=1024, retries=3, temperature=0.2):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("API error 500: boom")
+            return f"response-{self.calls}"
+
+    monkeypatch.setattr(run_benchmark.time, "sleep", lambda delay: None)
+    questions = [
+        {"id": 1, "category": "one", "prompt": "first"},
+        {"id": 2, "category": "two", "prompt": "second"},
+        {"id": 3, "category": "three", "prompt": "third"},
+    ]
+
+    results, optimization_results = run_benchmark._run_questions_sequential(
+        questions=questions,
+        client=FakeClient(),
+        scorer_func=lambda q_id, response: 50,
+        runtime=run_benchmark.RuntimeOptions(rate_limit_delay=0),
+        model_name="model",
+    )
+
+    assert [result["id"] for result in results] == [1, 2, 3]
+    assert results[1]["error"] == "API error 500: boom"
+    assert results[1]["score"] == 0
+    assert results[1]["critical_error"] is False
+    assert optimization_results == []
+
+
+def test_concurrent_runner_skips_question_on_runtime_error(monkeypatch):
+    class FakeClient:
+        def query(self, prompt, max_tokens=1024, retries=3, temperature=0.2):
+            if prompt == "second":
+                raise RuntimeError("API error 500: boom")
+            return f"response-{prompt}"
+
+    monkeypatch.setattr(run_benchmark.time, "sleep", lambda delay: None)
+    questions = [
+        {"id": 1, "category": "one", "prompt": "first"},
+        {"id": 2, "category": "two", "prompt": "second"},
+        {"id": 3, "category": "three", "prompt": "third"},
+    ]
+    runtime = run_benchmark.RuntimeOptions(rate_limit_delay=0, concurrency=1)
+
+    results = run_benchmark._run_questions_concurrent(
+        questions,
+        FakeClient(),
+        scorer_func=lambda q_id, response: 50,
+        runtime=runtime,
+        model_name="test-model",
+    )
+
+    assert [result["id"] for result in results] == [1, 2, 3]
+    assert results[1]["error"] == "API error 500: boom"
+    assert results[1]["score"] == 0
+
+
 def test_orchestrator_exports_interrupted_metadata(monkeypatch):
     class FakeClient:
         def query(self, prompt, max_tokens=1024, retries=3, temperature=0.2):
@@ -478,6 +592,89 @@ request_log: ./results/requests.jsonl
     assert config.provider.endpoint == "http://localhost:11434"
     assert config.provider.keep_alive == "30m"
     assert config.request_log == "./results/requests.jsonl"
+
+
+def test_cloudrun_cost_estimate_matches_known_bugtrace_rate():
+    from utils.cloudrun_cost import estimate_cost
+
+    estimate = estimate_cost(
+        3600,
+        cpu=8,
+        memory_gib=32,
+        gpu_type="nvidia-l4",
+        gpu_zonal_redundancy=False,
+    )
+
+    assert estimate.cpu_cost == pytest.approx(8 * 0.000018 * 3600)
+    assert estimate.memory_cost == pytest.approx(32 * 0.000002 * 3600)
+    assert estimate.gpu_cost == pytest.approx(0.0001867 * 3600)
+    assert estimate.total_cost == pytest.approx(1.42092, abs=1e-4)
+
+
+def test_cloudrun_cost_estimate_without_gpu_omits_gpu_cost():
+    from utils.cloudrun_cost import estimate_cost
+
+    estimate = estimate_cost(100, cpu=1, memory_gib=1, gpu_type=None)
+
+    assert estimate.gpu_cost == 0.0
+    assert estimate.total_cost == pytest.approx(100 * 0.000018 + 100 * 0.000002)
+
+
+def test_cloudrun_cost_unknown_gpu_type_raises():
+    from utils.cloudrun_cost import estimate_cost
+
+    with pytest.raises(ValueError, match="Unknown Cloud Run GPU type"):
+        estimate_cost(10, cpu=1, memory_gib=1, gpu_type="nvidia-h100")
+
+
+def test_config_loads_cloudrun_cost_section(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+provider:
+  name: ollama
+cloudrun_cost:
+  enabled: true
+  gpu_type: nvidia-l4
+  gpu_zonal_redundancy: false
+  cpu: 8
+  memory_gib: 32
+""",
+        encoding="utf-8",
+    )
+
+    config = run_benchmark.load_config(str(config_path))
+
+    assert config.cloudrun_cost.enabled is True
+    assert config.cloudrun_cost.gpu_type == "nvidia-l4"
+    assert config.cloudrun_cost.cpu == 8
+    assert config.cloudrun_cost.memory_gib == 32
+
+
+def test_config_cloudrun_cost_defaults_disabled(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("provider:\n  name: ollama\n", encoding="utf-8")
+
+    config = run_benchmark.load_config(str(config_path))
+
+    assert config.cloudrun_cost.enabled is False
+
+
+def test_config_rejects_unknown_cloudrun_gpu_type(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+provider:
+  name: ollama
+cloudrun_cost:
+  enabled: true
+  gpu_type: nvidia-h100
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unknown Cloud Run GPU type"):
+        run_benchmark.load_config(str(config_path))
 
 
 def test_interactive_loads_dataset_once_for_multiple_models(monkeypatch):

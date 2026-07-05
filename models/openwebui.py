@@ -90,16 +90,24 @@ class OpenWebUIClient(APIClient):
                 ) from e
 
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 401:
+                status = e.response.status_code
+                if status == 401:
                     raise RuntimeError(
                         "Authentication required. Provide API key via --api-key or OPENWEBUI_API_KEY"
                     ) from e
-                if e.response.status_code == 429:
+                if status == 429:
                     print("   Rate limited, waiting...")
                     time.sleep(5)
                     continue
+                if status >= 500:
+                    if attempt < retries - 1:
+                        print(
+                            f"   Server error {status} on attempt {attempt + 1}/{retries}, retrying..."
+                        )
+                        time.sleep(2**attempt)
+                        continue
                 raise RuntimeError(
-                    f"API error {e.response.status_code}: {e.response.text}"
+                    f"API error {status}: {e.response.text}"
                 ) from e
 
             except (KeyError, json.JSONDecodeError) as e:

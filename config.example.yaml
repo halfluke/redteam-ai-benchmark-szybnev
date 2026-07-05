@@ -41,6 +41,19 @@ optimization:
     - few_shot
     - cve_framing
 
+# Estimated Cloud Run cost, printed once at the end of the run (or once per
+# model in `interactive` mode). This is an ESTIMATE from published on-demand
+# instance-based-billing rates (CPU/memory/GPU per second) multiplied by
+# observed instance uptime -- not the authoritative GCP invoice, since real
+# billing data lags actual usage by ~24h with no real-time API. Only
+# meaningful when targeting a Cloud Run GPU deployment.
+# cloudrun_cost:
+#   enabled: false
+#   gpu_type: nvidia-l4        # nvidia-l4 | nvidia-rtx-pro-6000
+#   gpu_zonal_redundancy: false
+#   cpu: 8                     # vCPUs allocated to the Cloud Run service
+#   memory_gib: 32             # memory (GiB) allocated to the Cloud Run service
+
 # Benchmark Settings
 questions_file: datasets/v2/benchmark.jsonl
 answers_file: answers_all.txt

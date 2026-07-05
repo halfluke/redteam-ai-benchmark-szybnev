@@ -46,6 +46,7 @@ from scoring import create_scorer
 from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
+from utils.cloudrun_cost import estimate_cost, format_cost_estimate
 from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, KeepaliveConfig
 from utils.export import BenchmarkExporter
 
@@ -589,6 +590,18 @@ def _langfuse_config_or_none(config):
     return None
 
 
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration in seconds as a short human-readable string."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
 def _print_runtime(runtime: RuntimeOptions) -> None:
     print(
         f"Runtime: max_tokens={runtime.max_tokens}, "
@@ -799,6 +812,8 @@ def cmd_interactive(args):
                     print("=" * 70)
                     print(f"Testing model [{i}/{len(selected_model_names)}]: {model_name}")
                     print("=" * 70)
+                    model_started_at = time.time()
+                    print(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(model_started_at))}")
                     print()
 
                     try:
@@ -834,6 +849,19 @@ def cmd_interactive(args):
                                     shutdown_requested=shutdown.is_requested,
                                     keepalive=keepalive,
                                 )
+                            print(
+                                f"Finished {model_name}: {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                                f"(total {_format_elapsed(time.time() - model_started_at)})"
+                            )
+                            if config and config.cloudrun_cost.enabled:
+                                estimate = estimate_cost(
+                                    time.time() - model_started_at,
+                                    cpu=config.cloudrun_cost.cpu,
+                                    memory_gib=config.cloudrun_cost.memory_gib,
+                                    gpu_type=config.cloudrun_cost.gpu_type,
+                                    gpu_zonal_redundancy=config.cloudrun_cost.gpu_zonal_redundancy,
+                                )
+                                print(f"💰 {format_cost_estimate(estimate)}")
                         except RuntimeError as e:
                             print(f"   ❌ Error: {e}")
                             print(f"   Skipping remaining questions for {model_name}")
@@ -918,6 +946,7 @@ def cmd_run_benchmark(args):
     try:
         try:
             with install_signal_handlers() as shutdown:
+                run_started_at = time.time()
                 is_remote = client.base_url.startswith("https://")
                 if is_remote:
                     print(
@@ -944,6 +973,7 @@ def cmd_run_benchmark(args):
                     f"rate_limit_delay={runtime.rate_limit_delay}, "
                     f"concurrency={runtime.concurrency}"
                 )
+                print(f"   Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run_started_at))}")
                 print("   Evaluating uncensoredness & technical accuracy\n")
 
                 dataset = _load_dataset_for_cli(_questions_file_for_args(args, config))
@@ -994,6 +1024,20 @@ def cmd_run_benchmark(args):
                     print(f"   ❌ Error: {e}")
                     print("   Aborting benchmark.")
                     sys.exit(1)
+
+                print(
+                    f"\n   Finished: {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(total {_format_elapsed(time.time() - run_started_at)})"
+                )
+                if config and config.cloudrun_cost.enabled:
+                    estimate = estimate_cost(
+                        time.time() - run_started_at,
+                        cpu=config.cloudrun_cost.cpu,
+                        memory_gib=config.cloudrun_cost.memory_gib,
+                        gpu_type=config.cloudrun_cost.gpu_type,
+                        gpu_zonal_redundancy=config.cloudrun_cost.gpu_zonal_redundancy,
+                    )
+                    print(f"   💰 {format_cost_estimate(estimate)}")
 
                 if run_result.optimization_results:
                     save_optimization_results(

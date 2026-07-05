@@ -49,6 +49,55 @@ def _short_snippet(text: str, limit: int = 120) -> str:
     return snippet + ("..." if len(text) > limit else "")
 
 
+def _now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_duration(latency_ms: Optional[float]) -> str:
+    """Format a latency in milliseconds as a short human-readable duration."""
+    if latency_ms is None:
+        return "?"
+    seconds = latency_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, seconds = divmod(seconds, 60)
+    return f"{int(minutes)}m{seconds:04.1f}s"
+
+
+def _format_score_rationale(
+    censored: bool,
+    critical_error: bool,
+    criteria_passed: Optional[List[str]],
+    criteria_failed: Optional[List[str]],
+    details: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Summarize which deterministic rubric elements produced this score.
+
+    Returns ``None`` when the active scorer is not the rubric scorer (e.g. the
+    plain keyword scorer), since there is no per-criterion breakdown to show.
+    """
+    details = details or {}
+    if details.get("method") != "rubric":
+        return None
+
+    if censored:
+        return "refused (censored)"
+
+    if critical_error:
+        fatal = details.get("fatal_errors") or []
+        ids = [f.get("criterion", "?") for f in fatal] or ["unknown"]
+        return f"fatal_error: {', '.join(ids)}"
+
+    passed = criteria_passed or []
+    failed = criteria_failed or []
+    total = len(passed) + len(failed)
+    if total == 0:
+        return None
+    passed_str = ", ".join(passed) if passed else "none"
+    missing = ", ".join(failed) if failed else "none"
+    return f"{len(passed)}/{total} criteria passed: {passed_str}  |  missing: {missing}"
+
+
 def _make_result(
     q: Dict[str, Any],
     score: int,
@@ -63,6 +112,7 @@ def _make_result(
     evidence: Optional[List[Dict[str, Any]]] = None,
     metrics: Optional[Dict[str, Any]] = None,
     details: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the persisted per-question result object."""
     return QuestionResult(
@@ -85,7 +135,23 @@ def _make_result(
         capability=q.get("capability"),
         weight=float(q.get("weight", 1.0)),
         details=details or {},
+        error=error,
     ).to_dict()
+
+
+def _make_error_result(q: Dict[str, Any], error: Exception) -> Dict[str, Any]:
+    """Build a result for a question that failed at the API/transport level.
+
+    Kept separate from a genuine 0% answer: no optimization is attempted and
+    the failure is surfaced through the dedicated ``error`` field instead of
+    ``critical_error`` (which means "materially wrong technical claim").
+    """
+    return _make_result(
+        q,
+        score=0,
+        response=f"[ERROR] {error}",
+        error=str(error),
+    )
 
 
 def _query_and_score(
@@ -186,7 +252,8 @@ def _run_questions_sequential(
             break
 
         with keepalive_busy(keepalive, "target"):
-            print(f"[Q{q['id']:>2}] {q['category']}...")
+            print(f"[{_now_str()}] [Q{q['id']:>2}] {q['category']}...")
+            print(f"      Question: {_short_snippet(q['prompt'], limit=160)}")
 
             try:
                 query_result = _query_and_score(
@@ -200,6 +267,21 @@ def _run_questions_sequential(
             except GracefulShutdown:
                 print("  ⚠️  Graceful shutdown during model query.")
                 break
+            except RuntimeError as e:
+                print(f"   ❌ Error [{model_name}]: {e}")
+                print("  ⚠️  Skipping this question and continuing...")
+                results.append(_make_error_result(q, e))
+                _log_request_result(
+                    runtime,
+                    q,
+                    phase="baseline",
+                    response=f"[ERROR] {e}",
+                    score=0,
+                    latency_ms=None,
+                    censored=False,
+                    critical_error=False,
+                )
+                continue
         response = query_result["response"]
         score = query_result["score"]
         latency_ms = query_result["latency_ms"]
@@ -213,7 +295,12 @@ def _run_questions_sequential(
         metrics = query_result["metrics"]
         details = query_result["details"]
 
-        print(f"      Score: {score}%  |  {_short_snippet(response)}")
+        print(
+            f"      Score: {score}%  |  {_format_duration(latency_ms)}  |  {_short_snippet(response)}"
+        )
+        rationale = _format_score_rationale(censored, critical_error, criteria_passed, criteria_failed, details)
+        if rationale:
+            print(f"      Why: {rationale}")
 
         _log_request_result(
             runtime,
@@ -315,7 +402,13 @@ def _run_questions_sequential(
                 }
             )
 
-            print(f"  ✓ Optimization complete: {score}%\n")
+            opt_rationale = _format_score_rationale(
+                censored, critical_error, criteria_passed, criteria_failed, details
+            )
+            print(f"  ✓ Optimization complete: {score}%")
+            if opt_rationale:
+                print(f"      Why: {opt_rationale}")
+            print()
         elif tracer:
             tracer.log_generation(
                 question_id=q["id"],
@@ -361,6 +454,7 @@ def _run_questions_concurrent(
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
+    model_name: str = "",
 ) -> List[Dict[str, Any]]:
     """Run independent questions concurrently and return stable ordered results."""
     indexed_results = {}
@@ -381,7 +475,8 @@ def _run_questions_concurrent(
                 except GracefulShutdown:
                     interrupted = True
                     break
-            print(f"[Q{q['id']:>2}] {q['category']}...")
+            print(f"[{_now_str()}] [Q{q['id']:>2}] {q['category']}...")
+            print(f"      Question: {_short_snippet(q['prompt'], limit=160)}")
             future = executor.submit(
                 _query_and_score,
                 client,
@@ -403,7 +498,26 @@ def _run_questions_concurrent(
             except GracefulShutdown:
                 interrupted = True
                 break
+            except RuntimeError as e:
+                q = questions[index]
+                print(f"   ❌ Error [{model_name}] on [Q{q['id']:>2}]: {e}")
+                print("  ⚠️  Skipping this question and continuing...")
+                indexed_results[index] = _make_error_result(q, e)
+                continue
             q = query_result["question"]
+            print(
+                f"      [Q{q['id']:>2}] done  |  Score: {query_result['score']}%  |  "
+                f"{_format_duration(query_result['latency_ms'])}"
+            )
+            rationale = _format_score_rationale(
+                query_result["censored"],
+                query_result["critical_error"],
+                query_result["criteria_passed"],
+                query_result["criteria_failed"],
+                query_result["details"],
+            )
+            if rationale:
+                print(f"      [Q{q['id']:>2}] Why: {rationale}")
             _log_request_result(
                 runtime,
                 q,

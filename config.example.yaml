@@ -41,6 +41,18 @@ optimization:
     - few_shot
     - cve_framing
 
+# Pre-flight GPU residency check: loads the model with a minimal request,
+# then asks Ollama's own /api/ps for size_vram vs size (bytes of the model
+# actually resident in GPU VRAM) and aborts before the paid benchmark starts
+# if too little of it is GPU-resident. Catches silent CPU fallback on Ollama
+# GPU deployments (e.g. a broken/misconfigured Cloud Run GPU backend) before
+# it burns a full run's worth of time and money. Only measurable for Ollama
+# clients; skipped for other providers.
+# gpu_check:
+#   enabled: false
+#   min_vram_fraction: 0.9
+#   timeout_s: 120
+
 # Estimated Cloud Run cost, printed once at the end of the run (or once per
 # model in `interactive` mode). This is an ESTIMATE from published on-demand
 # instance-based-billing rates (CPU/memory/GPU per second) multiplied by

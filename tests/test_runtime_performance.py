@@ -677,6 +677,54 @@ cloudrun_cost:
         run_benchmark.load_config(str(config_path))
 
 
+def test_config_loads_gpu_check_section(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+provider:
+  name: ollama
+gpu_check:
+  enabled: true
+  min_vram_fraction: 0.9
+  timeout_s: 60
+""",
+        encoding="utf-8",
+    )
+
+    config = run_benchmark.load_config(str(config_path))
+
+    assert config.gpu_check.enabled is True
+    assert config.gpu_check.min_vram_fraction == 0.9
+    assert config.gpu_check.timeout_s == 60
+
+
+def test_config_gpu_check_defaults_disabled(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("provider:\n  name: ollama\n", encoding="utf-8")
+
+    config = run_benchmark.load_config(str(config_path))
+
+    assert config.gpu_check.enabled is False
+    assert config.gpu_check.min_vram_fraction == 0.0
+
+
+def test_config_rejects_out_of_range_gpu_check_fraction(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+provider:
+  name: ollama
+gpu_check:
+  enabled: true
+  min_vram_fraction: 1.5
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="gpu_check.min_vram_fraction"):
+        run_benchmark.load_config(str(config_path))
+
+
 def test_interactive_loads_dataset_once_for_multiple_models(monkeypatch):
     class FakeClient:
         base_url = "http://provider.local"

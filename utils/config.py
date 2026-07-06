@@ -72,6 +72,25 @@ class KeepaliveConfig:
 
 
 @dataclass
+class GpuCheckConfig:
+    """Configuration for the pre-flight GPU residency sanity check.
+
+    Loads the model with a minimal request, then asks Ollama's own /api/ps
+    for size_vram vs size (bytes of the model actually resident in GPU
+    VRAM) and aborts before the paid benchmark starts if too little of it
+    is GPU-resident. This catches silent CPU fallback (e.g. a misconfigured
+    or broken Ollama GPU backend on Cloud Run) before it burns a full run's
+    worth of time and money. Only meaningful for Ollama-backed clients;
+    unmeasurable for other providers, in which case the check is skipped
+    rather than treated as a failure.
+    """
+
+    enabled: bool = False
+    min_vram_fraction: float = 0.0
+    timeout_s: int = 120
+
+
+@dataclass
 class CloudRunCostConfig:
     """Configuration for the optional estimated Cloud Run cost printed at run end.
 
@@ -107,6 +126,7 @@ class BenchmarkConfig:
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     keepalive: KeepaliveConfig = field(default_factory=KeepaliveConfig)
     keepalive_in_yaml: bool = False
+    gpu_check: GpuCheckConfig = field(default_factory=GpuCheckConfig)
     cloudrun_cost: CloudRunCostConfig = field(default_factory=CloudRunCostConfig)
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     questions_file: str = DEFAULT_QUESTIONS_FILE
@@ -166,6 +186,15 @@ def _dict_to_keepalive_config(data: Dict[str, Any]) -> KeepaliveConfig:
         max_tokens=data.get("max_tokens", 16),
         prompt=data.get("prompt", "Say OK"),
         timeout_s=data.get("timeout_s", 90),
+    )
+
+
+def _dict_to_gpu_check_config(data: Dict[str, Any]) -> GpuCheckConfig:
+    """Convert dict to GpuCheckConfig."""
+    return GpuCheckConfig(
+        enabled=data.get("enabled", False),
+        min_vram_fraction=data.get("min_vram_fraction", 0.0),
+        timeout_s=data.get("timeout_s", 120),
     )
 
 
@@ -277,6 +306,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
     langfuse = _dict_to_langfuse_config(data.get("langfuse", {}))
     keepalive_in_yaml = "keepalive" in data
     keepalive = _dict_to_keepalive_config(data.get("keepalive", {}))
+    gpu_check = _dict_to_gpu_check_config(data.get("gpu_check", {}))
     cloudrun_cost = _dict_to_cloudrun_cost_config(data.get("cloudrun_cost", {}))
 
     config = BenchmarkConfig(
@@ -286,6 +316,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
         optimization=optimization,
         keepalive=keepalive,
         keepalive_in_yaml=keepalive_in_yaml,
+        gpu_check=gpu_check,
         cloudrun_cost=cloudrun_cost,
         langfuse=langfuse,
         questions_file=data.get("questions_file", DEFAULT_QUESTIONS_FILE),
@@ -332,6 +363,11 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("keepalive.max_tokens must be > 0")
     if config.keepalive.timeout_s <= 0:
         raise ValueError("keepalive.timeout_s must be > 0")
+
+    if not 0 <= config.gpu_check.min_vram_fraction <= 1:
+        raise ValueError("gpu_check.min_vram_fraction must be between 0 and 1")
+    if config.gpu_check.timeout_s <= 0:
+        raise ValueError("gpu_check.timeout_s must be > 0")
 
     if config.cloudrun_cost.enabled:
         if config.cloudrun_cost.cpu <= 0:

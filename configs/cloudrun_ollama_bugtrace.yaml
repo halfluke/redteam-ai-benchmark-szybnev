@@ -31,6 +31,16 @@ keepalive:
   prompt: "Say OK"
   timeout_s: 180
 
+# Aborts before the paid run if Ollama's own /api/ps reports less than 90%
+# of the model resident in GPU VRAM -- catches silent CPU fallback (see
+# GCP-CLOUDRUN-AImodels/README.md and
+# https://github.com/ollama/ollama/issues/16449) using Ollama's own
+# authoritative accounting instead of an inferred speed heuristic.
+gpu_check:
+  enabled: true
+  min_vram_fraction: 0.9
+  timeout_s: 120
+
 # Estimate only (see utils/cloudrun_cost.py) -- matches deploy-bugtrace.sh's
 # defaults (8 CPU, 32Gi memory, 1x L4, --no-gpu-zonal-redundancy). Update if
 # you deployed with different MEMORY/CPU overrides.

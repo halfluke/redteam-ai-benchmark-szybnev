@@ -39,6 +39,7 @@ from benchmark.types import (
     DEFAULT_RATE_LIMIT_DELAY,
     DEFAULT_TEMPERATURE,
 )
+from benchmark.gpu_check import GpuCheckFailed, run_gpu_check
 from benchmark.keepalive import ModelKeepalive
 from models import create_client, provider_auth_kwargs
 from optimization import PromptOptimizer, save_optimization_results
@@ -47,7 +48,7 @@ from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
 from utils.cloudrun_cost import estimate_cost, format_cost_estimate
-from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, KeepaliveConfig
+from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, GpuCheckConfig, KeepaliveConfig
 from utils.export import BenchmarkExporter
 
 Langfuse = langfuse_module.Langfuse
@@ -355,6 +356,48 @@ def _resolve_keepalive_config(config) -> KeepaliveConfig:
     if config and getattr(config, "keepalive", None):
         return config.keepalive
     return KeepaliveConfig()
+
+
+def _resolve_gpu_check_config(args, config) -> GpuCheckConfig:
+    """Resolve CLI > config > default GPU residency check settings."""
+    base = config.gpu_check if config and getattr(config, "gpu_check", None) else GpuCheckConfig()
+    cli_min_fraction = getattr(args, "min_vram_fraction", None)
+    if cli_min_fraction is None:
+        return base
+    return GpuCheckConfig(
+        enabled=cli_min_fraction > 0,
+        min_vram_fraction=cli_min_fraction,
+        timeout_s=base.timeout_s,
+    )
+
+
+def _run_gpu_check_or_exit(client, model_name: str, args, config) -> None:
+    """Run the pre-flight GPU residency check, printing status and raising on failure.
+
+    Must only ever be called with the target model client, never an
+    optimizer's client: the optimizer commonly runs against a separate
+    (often local, non-Cloud-Run) endpoint with its own hardware profile, and
+    should never be blocked by a GPU expectation that applies to the paid
+    Cloud Run target.
+    """
+    gpu_check_cfg = _resolve_gpu_check_config(args, config)
+    if not gpu_check_cfg.enabled or gpu_check_cfg.min_vram_fraction <= 0:
+        return
+    print(
+        f"   Checking GPU residency for {model_name} "
+        f"(min {gpu_check_cfg.min_vram_fraction:.0%} in VRAM)...",
+        end=" ",
+        flush=True,
+    )
+    fraction = run_gpu_check(
+        client,
+        min_vram_fraction=gpu_check_cfg.min_vram_fraction,
+        timeout_s=gpu_check_cfg.timeout_s,
+    )
+    if fraction is None:
+        print("skipped (not measurable for this provider)")
+    else:
+        print(f"ok ({fraction:.0%} in VRAM)")
 
 
 def _should_run_keepalive(config, optimizer) -> bool:
@@ -829,6 +872,15 @@ def cmd_interactive(args):
                             print(f"❌ Cannot connect to model {model_name}")
                             continue
 
+                        # Target only -- never optimizer.optimizer_client, even
+                        # though the optimizer already exists at this point.
+                        try:
+                            _run_gpu_check_or_exit(model_client, model_name, args, config)
+                        except GpuCheckFailed as e:
+                            print(f"\n   ❌ {e}")
+                            print(f"   Skipping {model_name}")
+                            continue
+
                         try:
                             keepalive = _create_keepalive(model_client, optimizer, config)
                             keepalive_ctx = keepalive if keepalive else nullcontext()
@@ -975,6 +1027,14 @@ def cmd_run_benchmark(args):
                 )
                 print(f"   Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run_started_at))}")
                 print("   Evaluating uncensoredness & technical accuracy\n")
+
+                # Target only -- runs before the optimizer is created below, so
+                # it structurally cannot touch the optimizer's client/model.
+                try:
+                    _run_gpu_check_or_exit(client, args.model, args, config)
+                except GpuCheckFailed as e:
+                    print(f"\n❌ {e}")
+                    sys.exit(1)
 
                 dataset = _load_dataset_for_cli(_questions_file_for_args(args, config))
                 try:
@@ -1143,6 +1203,17 @@ def _add_runtime_args(parser):
     parser.add_argument(
         "--ollama-keep-alive",
         help="Ollama keep_alive value for /api/chat, e.g. 30m or -1",
+    )
+    parser.add_argument(
+        "--min-vram-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Abort before the paid benchmark run if Ollama's /api/ps reports "
+            "less than this fraction (0-1) of the model resident in GPU VRAM "
+            "(catches silent CPU fallback). 0 disables the check. "
+            "Default: config or disabled."
+        ),
     )
 
 

@@ -394,9 +394,11 @@ config.yaml
 .agents/
 skills-lock.json
 
-# Local Cloud Run endpoint overrides (contains real service URLs)
-scripts/local_env.sh
-
 # Track project scripts despite venv Scripts pattern above
 !scripts/
 !scripts/**
+
+# Local Cloud Run endpoint overrides (contains real service URLs) -- must
+# come after the !scripts/** re-include above, since gitignore rules are
+# order-dependent and a later negation would otherwise cancel this out.
+scripts/local_env.sh

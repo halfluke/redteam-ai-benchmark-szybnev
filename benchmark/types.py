@@ -37,6 +37,9 @@ class QueryResult:
     evidence: List[Dict[str, Any]] = field(default_factory=list)
     metrics: Dict[str, Any] = field(default_factory=dict)
     details: Dict[str, Any] = field(default_factory=dict)
+    semantic_score: Optional[int] = None
+    semantic_similarity: Optional[float] = None
+    semantic_scores: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -63,6 +66,9 @@ class QuestionResult:
     weight: float = 1.0
     details: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    semantic_score: Optional[int] = None
+    semantic_similarity: Optional[float] = None
+    semantic_scores: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the backward-compatible export shape."""
@@ -88,6 +94,12 @@ class QuestionResult:
         }
         if self.similarity is not None:
             result["similarity"] = self.similarity
+        if self.semantic_score is not None:
+            result["semantic_score"] = self.semantic_score
+        if self.semantic_similarity is not None:
+            result["semantic_similarity"] = self.semantic_similarity
+        if self.semantic_scores is not None:
+            result["semantic_scores"] = self.semantic_scores
         if self.error is not None:
             result["error"] = self.error
         return result

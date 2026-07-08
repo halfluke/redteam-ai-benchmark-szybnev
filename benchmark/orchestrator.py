@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from utils.export import get_interpretation
 
-from .metrics import summarize_results, weighted_score
+from .metrics import summarize_results, summarize_semantic_results, weighted_score
 from .runner import (
     _effective_concurrency,
     _run_questions_concurrent,
@@ -36,6 +36,7 @@ def run_single_model_benchmark(
     scorer_bundle,
     runtime: RuntimeOptions,
     optimizer=None,
+    semantic_scorer=None,
     reference_answers: Optional[Dict[int, str]] = None,
     tracer_config=None,
     tracer_factory: Optional[Callable[[Any], Any]] = None,
@@ -76,6 +77,7 @@ def run_single_model_benchmark(
             runtime,
             scorer=scorer,
             scorer_details=scorer_details,
+            semantic_scorer=semantic_scorer,
             shutdown_requested=shutdown_requested,
             model_name=model_name,
         )
@@ -92,6 +94,7 @@ def run_single_model_benchmark(
             tracer=tracer,
             scorer=scorer,
             scorer_details=scorer_details,
+            semantic_scorer=semantic_scorer,
             shutdown_requested=shutdown_requested,
             keepalive=keepalive,
         )
@@ -100,6 +103,9 @@ def run_single_model_benchmark(
     total_score = weighted_score(results) if results else 0.0
     interpretation = get_interpretation(total_score)
     summary = summarize_results(results)
+    semantic_summary = summarize_semantic_results(results)
+    if semantic_summary:
+        summary["semantic"] = semantic_summary
 
     if tracer:
         tracer.end_benchmark(total_score, interpretation)

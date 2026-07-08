@@ -7,6 +7,13 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from scoring.semantic_scorer import (
+    DEFAULT_SEMANTIC_ANSWERS_FILE,
+    DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
+    DEFAULT_SEMANTIC_MODEL,
+    DEFAULT_SEMANTIC_THRESHOLDS,
+)
+
 DEFAULT_QUESTIONS_FILE = "datasets/v2/benchmark.jsonl"
 DEFAULT_ANSWERS_FILE = "answers_all.txt"
 DEFAULT_SCORER = "rubric"
@@ -29,10 +36,25 @@ class ProviderConfig:
 
 
 @dataclass
+class SemanticConfig:
+    """Configuration for optional parallel semantic scoring."""
+
+    enabled: bool = False
+    answers_file: str = DEFAULT_SEMANTIC_ANSWERS_FILE
+    model: str = DEFAULT_SEMANTIC_MODEL
+    thresholds: Dict[int, float] = field(
+        default_factory=lambda: dict(DEFAULT_SEMANTIC_THRESHOLDS)
+    )
+    device: str = "auto"
+    max_seq_length: int = DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
+
+
+@dataclass
 class ScoringConfig:
     """Configuration for scoring system."""
 
     method: str = DEFAULT_SCORER
+    semantic: SemanticConfig = field(default_factory=SemanticConfig)
 
 
 @dataclass
@@ -213,6 +235,24 @@ def _dict_to_scoring_config(data: Dict[str, Any]) -> ScoringConfig:
     """Convert dict to ScoringConfig."""
     return ScoringConfig(
         method=data.get("method", DEFAULT_SCORER),
+        semantic=_dict_to_semantic_config(data.get("semantic", {})),
+    )
+
+
+def _dict_to_semantic_config(data: Dict[str, Any]) -> SemanticConfig:
+    """Convert nested semantic scoring config."""
+    raw_thresholds = data.get("thresholds", DEFAULT_SEMANTIC_THRESHOLDS)
+    thresholds = {
+        int(score): float(threshold)
+        for score, threshold in dict(raw_thresholds).items()
+    }
+    return SemanticConfig(
+        enabled=bool(data.get("enabled", False)),
+        answers_file=data.get("answers_file", DEFAULT_SEMANTIC_ANSWERS_FILE),
+        model=data.get("model", DEFAULT_SEMANTIC_MODEL),
+        thresholds=thresholds,
+        device=data.get("device", "auto"),
+        max_seq_length=int(data.get("max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)),
     )
 
 
@@ -346,6 +386,21 @@ def validate_config(config: BenchmarkConfig) -> None:
 
     if config.scoring.method != DEFAULT_SCORER:
         raise ValueError(f"Unsupported scoring method: {config.scoring.method}")
+    for score, threshold in config.scoring.semantic.thresholds.items():
+        if not 0 <= score <= 100:
+            raise ValueError("scoring.semantic.thresholds scores must be between 0 and 100")
+        if not 0 <= threshold <= 1:
+            raise ValueError(
+                "scoring.semantic.thresholds similarity values must be between 0 and 1"
+            )
+    ordered_thresholds = [
+        threshold
+        for _, threshold in sorted(
+            config.scoring.semantic.thresholds.items(), reverse=True
+        )
+    ]
+    if ordered_thresholds != sorted(ordered_thresholds, reverse=True):
+        raise ValueError("scoring.semantic.thresholds must decrease as scores decrease")
 
     unsupported_formats = set(config.export.formats) - {"json", "csv", "criteria_csv"}
     if unsupported_formats:
@@ -430,6 +485,14 @@ def save_config(config: BenchmarkConfig, config_path: str) -> None:
         },
         "scoring": {
             "method": config.scoring.method,
+            "semantic": {
+                "enabled": config.scoring.semantic.enabled,
+                "answers_file": config.scoring.semantic.answers_file,
+                "model": config.scoring.semantic.model,
+                "thresholds": config.scoring.semantic.thresholds,
+                "device": config.scoring.semantic.device,
+                "max_seq_length": config.scoring.semantic.max_seq_length,
+            },
         },
         "export": {
             "formats": config.export.formats,

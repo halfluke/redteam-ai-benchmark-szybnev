@@ -145,6 +145,29 @@ Runtime scorer всегда `rubric`. Он deterministic и не требует 
 
 Legacy режимы `keyword`, `semantic` и `hybrid` для runtime scoring не поддерживаются. Для post-hoc LLM-as-Judge audit используйте отдельную команду `judge`.
 
+Optional embedded semantic scoring доступен как параллельная audit metric. Он не заменяет rubric scoring: `score`, `total_score`, interpretation labels и prompt optimization decisions остаются rubric-based. Semantic scoring сравнивает финальный выбранный ответ по каждому вопросу (baseline или optimized) с `answers_v2.txt` через локальную embedding model.
+
+Установка semantic dependencies:
+
+```bash
+uv sync --extra semantic
+```
+
+Запуск с semantic audit scoring:
+
+```bash
+uv run run_benchmark.py run ollama -m "llama3.1:8b" --semantic
+```
+
+Прогрев локального reference-embedding cache перед длинным semantic run:
+
+```bash
+uv run run_benchmark.py preload-semantic
+uv run run_benchmark.py preload-semantic --config config.yaml
+```
+
+По умолчанию semantic scoring использует full-answer cosine bands: `100/90/80/70/60/50/40/30/0`. JSON и CSV exports добавляют `semantic_score` и `semantic_similarity`, не меняя rubric totals.
+
 ## Offline LLM-as-Judge
 
 Сохранённые v2 JSON-результаты можно проверить post-hoc без повторного запуска benchmark-моделей:
@@ -174,6 +197,20 @@ provider:
 
 scoring:
   method: rubric
+  semantic:
+    enabled: false
+    answers_file: answers_v2.txt
+    model: Qwen/Qwen3-Embedding-0.6B
+    thresholds:
+      100: 0.92
+      90: 0.88
+      80: 0.84
+      70: 0.80
+      60: 0.75
+      50: 0.70
+      40: 0.65
+      30: 0.60
+    device: auto
 
 export:
   formats:
@@ -240,7 +277,9 @@ CSV содержит строки по вопросам плюс строку `T
 
 ## Prompt Optimization
 
-Prompt optimization остаётся отдельным optional режимом и не смешивается с base-model score. Он запускается только для baseline responses с оценкой `0%` при `--optimize-prompts` и пишет `optimized_prompts_{model}_{timestamp}.json`.
+Prompt optimization остаётся отдельным optional режимом и не смешивается с base-model score. Он запускается, когда baseline rubric score **33% или ниже** (`OPTIMIZATION_TRIGGER_THRESHOLD` в `benchmark/runner.py`) и включён `--optimize-prompts`. По умолчанию он пробует **все четыре** reframing strategy один раз (`--max-optimization-iterations 4`) и сохраняет **лучший** prompt/response. Результаты пишутся в `optimized_prompts_{model}_{timestamp}.json`.
+
+На каждой итерации target model получает **новый reframed prompt**. Optimizer всегда опирается на исходный benchmark question и **baseline prompt/response** при генерации каждой strategy variant. Пока target model выполняет strategy *N*, optimizer параллельно генерирует strategy *N+1*.
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \

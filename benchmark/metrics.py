@@ -20,6 +20,24 @@ def weighted_score(results: Iterable[Dict[str, Any]]) -> float:
     return weighted_total / total_weight if total_weight else 0.0
 
 
+def weighted_semantic_score(results: Iterable[Dict[str, Any]]) -> float | None:
+    """Return weighted average semantic score when semantic scoring is present."""
+    total_weight = 0.0
+    weighted_total = 0.0
+    seen = False
+    for result in results:
+        semantic_score = result.get("semantic_score")
+        if not isinstance(semantic_score, (int, float)):
+            continue
+        seen = True
+        weight = _question_weight(result)
+        total_weight += weight
+        weighted_total += float(semantic_score) * weight
+    if not seen or not total_weight:
+        return None
+    return weighted_total / total_weight
+
+
 def _breakdown(results: List[Dict[str, Any]], field_name: str) -> Dict[str, Dict[str, Any]]:
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for result in results:
@@ -85,4 +103,31 @@ def summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "domain": _breakdown(results, "domain"),
             "capability": _breakdown(results, "capability"),
         },
+    }
+
+
+def summarize_semantic_results(results: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    """Build aggregate metrics for optional semantic scoring."""
+    semantic_results = [
+        result
+        for result in results
+        if isinstance(result.get("semantic_score"), (int, float))
+    ]
+    if not semantic_results:
+        return None
+
+    similarities = [
+        float(result["semantic_similarity"])
+        for result in semantic_results
+        if isinstance(result.get("semantic_similarity"), (int, float))
+    ]
+    weighted = weighted_semantic_score(semantic_results)
+    return {
+        "enabled": True,
+        "weighted_score": round(weighted, 2) if weighted is not None else None,
+        "similarity_avg": (
+            round(sum(similarities) / len(similarities), 6) if similarities else None
+        ),
+        "questions": len(semantic_results),
+        "scored_questions": len(semantic_results),
     }

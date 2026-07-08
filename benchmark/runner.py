@@ -11,7 +11,7 @@ from .keepalive import keepalive_busy
 from .shutdown import GracefulShutdown
 from .types import QueryResult, QuestionResult, RuntimeOptions
 
-OPTIMIZATION_TRIGGER_THRESHOLD = 25
+OPTIMIZATION_TRIGGER_THRESHOLD = 33
 
 
 def _sleep_between_requests(rate_limit_delay: float) -> None:
@@ -39,6 +39,40 @@ def _with_default_details(
     return scoring
 
 
+def _semantic_payload(
+    semantic: Optional[ScoringResult],
+    *,
+    answer_source: str,
+) -> Optional[Dict[str, Any]]:
+    """Return export-friendly semantic scoring metadata."""
+    if semantic is None:
+        return None
+    return {
+        "method": semantic.details.get("method", "semantic"),
+        "scorer_version": semantic.details.get("scorer_version"),
+        "score": semantic.score,
+        "similarity": semantic.similarity,
+        "normalized_score": semantic.normalized_score,
+        "reference_id": semantic.details.get("reference_id"),
+        "answer_source": answer_source,
+        "details": dict(semantic.details),
+    }
+
+
+def _score_semantic(
+    semantic_scorer,
+    q_id: int,
+    response: str,
+    *,
+    answer_source: str,
+) -> Optional[Dict[str, Any]]:
+    """Score the final selected answer with the optional semantic scorer."""
+    if semantic_scorer is None:
+        return None
+    scoring = semantic_scorer.score(q_id, response)
+    return _semantic_payload(scoring, answer_source=answer_source)
+
+
 def _response_snippet(response: str, limit: int = 180) -> str:
     snippet = response[:limit].replace("\n", " ").strip()
     return snippet + ("..." if len(response) > limit else "")
@@ -62,6 +96,18 @@ def _format_duration(latency_ms: Optional[float]) -> str:
         return f"{seconds:.1f}s"
     minutes, seconds = divmod(seconds, 60)
     return f"{int(minutes)}m{seconds:04.1f}s"
+
+
+def _format_final_scores(
+    rubric_score: int,
+    semantic_scores: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Format rubric and optional semantic scores for per-question summaries."""
+    if semantic_scores and isinstance(semantic_scores.get("score"), (int, float)):
+        return (
+            f"rubric {rubric_score}%  |  semantic {int(semantic_scores['score'])}%"
+        )
+    return f"rubric {rubric_score}%"
 
 
 def _format_score_rationale(
@@ -113,6 +159,7 @@ def _make_result(
     metrics: Optional[Dict[str, Any]] = None,
     details: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
+    semantic_scores: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the persisted per-question result object."""
     return QuestionResult(
@@ -136,6 +183,9 @@ def _make_result(
         weight=float(q.get("weight", 1.0)),
         details=details or {},
         error=error,
+        semantic_score=semantic_scores.get("score") if semantic_scores else None,
+        semantic_similarity=semantic_scores.get("similarity") if semantic_scores else None,
+        semantic_scores=semantic_scores,
     ).to_dict()
 
 
@@ -203,27 +253,30 @@ def _log_request_result(
     prompt: Optional[str] = None,
     optimization_iteration: Optional[int] = None,
     optimization_strategy: Optional[str] = None,
+    semantic_scores: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Write one request event without provider headers or credentials."""
-    append_request_log(
-        runtime.request_log,
-        {
-            "phase": phase,
-            "question_id": q.get("id"),
-            "category": q.get("category"),
-            "domain": q.get("domain"),
-            "difficulty": q.get("difficulty"),
-            "capability": q.get("capability"),
-            "prompt": prompt if prompt is not None else q.get("prompt"),
-            "response": response,
-            "score": score,
-            "latency_ms": latency_ms,
-            "censored": censored,
-            "critical_error": critical_error,
-            "optimization_iteration": optimization_iteration,
-            "optimization_strategy": optimization_strategy,
-        },
-    )
+    payload = {
+        "phase": phase,
+        "question_id": q.get("id"),
+        "category": q.get("category"),
+        "domain": q.get("domain"),
+        "difficulty": q.get("difficulty"),
+        "capability": q.get("capability"),
+        "prompt": prompt if prompt is not None else q.get("prompt"),
+        "response": response,
+        "score": score,
+        "latency_ms": latency_ms,
+        "censored": censored,
+        "critical_error": critical_error,
+        "optimization_iteration": optimization_iteration,
+        "optimization_strategy": optimization_strategy,
+    }
+    if semantic_scores:
+        payload["semantic_score"] = semantic_scores.get("score")
+        payload["semantic_similarity"] = semantic_scores.get("similarity")
+        payload["semantic_scores"] = semantic_scores
+    append_request_log(runtime.request_log, payload)
 
 
 def _run_questions_sequential(
@@ -237,6 +290,7 @@ def _run_questions_sequential(
     tracer=None,
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
+    semantic_scorer=None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
     keepalive=None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -294,6 +348,7 @@ def _run_questions_sequential(
         evidence = query_result["evidence"]
         metrics = query_result["metrics"]
         details = query_result["details"]
+        answer_source = "baseline"
 
         print(
             f"      Score: {score}%  |  {_format_duration(latency_ms)}  |  {_short_snippet(response)}"
@@ -313,7 +368,7 @@ def _run_questions_sequential(
             critical_error=critical_error,
         )
 
-        if score < OPTIMIZATION_TRIGGER_THRESHOLD and optimizer:
+        if score <= OPTIMIZATION_TRIGGER_THRESHOLD and optimizer:
             print(f"  ⚠️  Low score ({score}%), starting optimization...")
 
             if tracer:
@@ -388,6 +443,7 @@ def _run_questions_sequential(
             evidence = opt_scoring.evidence
             metrics = opt_scoring.metrics
             details = opt_scoring.details
+            answer_source = "optimized"
 
             optimization_results.append(
                 {
@@ -408,7 +464,6 @@ def _run_questions_sequential(
             print(f"  ✓ Optimization complete: {score}%")
             if opt_rationale:
                 print(f"      Why: {opt_rationale}")
-            print()
         elif tracer:
             tracer.log_generation(
                 question_id=q["id"],
@@ -418,6 +473,28 @@ def _run_questions_sequential(
                 score=score,
                 latency_ms=latency_ms,
                 model=model_name,
+            )
+
+        semantic_scores = _score_semantic(
+            semantic_scorer,
+            q["id"],
+            response,
+            answer_source=answer_source,
+        )
+        print(f"      Final: {_format_final_scores(score, semantic_scores)}")
+        if semantic_scores and isinstance(semantic_scores.get("similarity"), (int, float)):
+            print(f"      Semantic similarity: {semantic_scores['similarity']}")
+        if semantic_scores:
+            _log_request_result(
+                runtime,
+                q,
+                phase="final",
+                response=response,
+                score=score,
+                latency_ms=latency_ms,
+                censored=censored,
+                critical_error=critical_error,
+                semantic_scores=semantic_scores,
             )
 
         results.append(
@@ -435,6 +512,7 @@ def _run_questions_sequential(
                 evidence,
                 metrics,
                 details,
+                semantic_scores=semantic_scores,
             )
         )
         try:
@@ -453,6 +531,7 @@ def _run_questions_concurrent(
     runtime: RuntimeOptions,
     scorer=None,
     scorer_details: Optional[Dict[str, Any]] = None,
+    semantic_scorer=None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
     model_name: str = "",
 ) -> List[Dict[str, Any]]:
@@ -505,10 +584,24 @@ def _run_questions_concurrent(
                 indexed_results[index] = _make_error_result(q, e)
                 continue
             q = query_result["question"]
+            semantic_scores = _score_semantic(
+                semantic_scorer,
+                q["id"],
+                query_result["response"],
+                answer_source="baseline",
+            )
             print(
-                f"      [Q{q['id']:>2}] done  |  Score: {query_result['score']}%  |  "
+                f"      [Q{q['id']:>2}] done  |  "
+                f"{_format_final_scores(query_result['score'], semantic_scores)}  |  "
                 f"{_format_duration(query_result['latency_ms'])}"
             )
+            if semantic_scores and isinstance(
+                semantic_scores.get("similarity"), (int, float)
+            ):
+                print(
+                    f"      [Q{q['id']:>2}] Semantic similarity: "
+                    f"{semantic_scores['similarity']}"
+                )
             rationale = _format_score_rationale(
                 query_result["censored"],
                 query_result["critical_error"],
@@ -527,6 +620,7 @@ def _run_questions_concurrent(
                 latency_ms=query_result["latency_ms"],
                 censored=query_result["censored"],
                 critical_error=query_result["critical_error"],
+                semantic_scores=semantic_scores,
             )
             indexed_results[index] = _make_result(
                 q,
@@ -542,6 +636,7 @@ def _run_questions_concurrent(
                 query_result["evidence"],
                 query_result["metrics"],
                 query_result["details"],
+                semantic_scores=semantic_scores,
             )
     except GracefulShutdown:
         interrupted = True

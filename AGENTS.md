@@ -104,6 +104,13 @@ Run with config:
 uv run run_benchmark.py run ollama -m "llama3.1:8b" --config config.yaml
 ```
 
+Warm local semantic embedding cache (requires `uv sync --extra semantic`):
+
+```bash
+uv run run_benchmark.py preload-semantic
+uv run run_benchmark.py preload-semantic --config config.yaml
+```
+
 Useful checks:
 
 ```bash
@@ -161,7 +168,7 @@ When changing config:
 
 ## Optional Features
 
-Prompt optimization only triggers on baseline responses that score `0%`. It uses an optimizer model, tests reframed prompts against the target model, and writes `optimized_prompts_{model}_{timestamp}.json` when optimization results exist.
+Prompt optimization only triggers on baseline responses that score **33% or lower**. It uses an optimizer model to reframe prompts from the frozen baseline context (original question + baseline response), tries every configured strategy (default: all four) with pipelined generation, keeps the best-scoring attempt, and writes `optimized_prompts_{model}_{timestamp}.json` when optimization results exist.
 
 Langfuse tracing is optional and configured through `config.yaml`. It records benchmark spans, question spans, optimization attempts, scores, payloads, and latency metadata.
 

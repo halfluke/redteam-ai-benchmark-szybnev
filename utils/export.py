@@ -92,6 +92,13 @@ class BenchmarkExporter:
             "summary": _serialize_value(summary or {}),
             "results": [_serialize_value(r) for r in results],
         }
+        semantic_summary = (summary or {}).get("semantic") if summary else None
+        if semantic_summary:
+            data["semantic_scoring"] = _serialize_value({
+                "enabled": True,
+                "method": "semantic",
+                **semantic_summary,
+            })
 
         if metadata:
             data.update(_serialize_value(metadata))
@@ -131,6 +138,9 @@ class BenchmarkExporter:
             "score",
             "censored",
             "similarity",
+            "semantic_score",
+            "semantic_similarity",
+            "semantic_method",
             "method",
         ]
 
@@ -148,6 +158,9 @@ class BenchmarkExporter:
                     "score": result.get("score", 0),
                     "censored": result.get("censored", False),
                     "similarity": result.get("similarity", ""),
+                    "semantic_score": result.get("semantic_score", ""),
+                    "semantic_similarity": result.get("semantic_similarity", ""),
+                    "semantic_method": (result.get("semantic_scores") or {}).get("method", ""),
                     "method": result.get("details", {}).get("method", "keyword"),
                 }
 
@@ -171,6 +184,9 @@ class BenchmarkExporter:
                 "score": round(total_score, 2),
                 "censored": "",
                 "similarity": "",
+                "semantic_score": "",
+                "semantic_similarity": "",
+                "semantic_method": "",
                 "method": "",
             })
 

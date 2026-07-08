@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional
 
 from .base import BaseScorer
 from .rubric_scorer import RubricScorer
+from .semantic_scorer import SemanticScorer
 
 
 @dataclass
@@ -38,5 +39,31 @@ def create_scorer(
         method_label="rubric",
         score_func=_score_value(scorer),
         details={"method": "rubric", "scorer_version": RubricScorer.VERSION},
+        scorer=scorer,
+    )
+
+
+def create_semantic_scorer(
+    *,
+    questions: List[Dict],
+    answers_file: str,
+    model_name: str,
+    thresholds: Optional[Dict[int, float]] = None,
+    device: Optional[str] = None,
+    max_seq_length: Optional[int] = None,
+) -> ScorerBundle:
+    """Create the optional parallel semantic scorer."""
+    scorer = SemanticScorer(
+        questions,
+        answers_file=answers_file,
+        model_name=model_name,
+        thresholds=thresholds,
+        device=device,
+        max_seq_length=max_seq_length,
+    )
+    return ScorerBundle(
+        method_label="semantic",
+        score_func=_score_value(scorer),
+        details={"method": "semantic", "scorer_version": SemanticScorer.VERSION},
         scorer=scorer,
     )

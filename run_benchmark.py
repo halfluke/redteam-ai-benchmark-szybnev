@@ -15,6 +15,7 @@ from typing import Dict, List
 from pick import pick
 
 import tracing.langfuse as langfuse_module
+from benchmark.metrics import weighted_semantic_score
 from benchmark import (
     BenchmarkDataset,
     GracefulShutdown,
@@ -43,7 +44,13 @@ from benchmark.gpu_check import GpuCheckFailed, run_gpu_check
 from benchmark.keepalive import ModelKeepalive
 from models import create_client, provider_auth_kwargs
 from optimization import PromptOptimizer, save_optimization_results
-from scoring import create_scorer
+from scoring import create_scorer, create_semantic_scorer
+from scoring.preload import preload_semantic_scorer
+from scoring.semantic_scorer import (
+    DEFAULT_SEMANTIC_ANSWERS_FILE,
+    DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
+    DEFAULT_SEMANTIC_MODEL,
+)
 from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
@@ -153,6 +160,15 @@ def _apply_config_defaults(args, config) -> None:
         and config.optimization.max_iterations != 3
     ):
         args.max_optimization_iterations = config.optimization.max_iterations
+    if hasattr(args, "semantic"):
+        semantic_config = getattr(config.scoring, "semantic", None)
+        if semantic_config:
+            if semantic_config.enabled and not args.semantic:
+                args.semantic = True
+            if not getattr(args, "semantic_model", None):
+                args.semantic_model = semantic_config.model
+            if not getattr(args, "semantic_answers", None):
+                args.semantic_answers = semantic_config.answers_file
 
 
 def _questions_file_for_args(args, config) -> str:
@@ -227,6 +243,46 @@ def _create_scorer_bundle(args, config, questions: List[Dict]):
         )
     except (RuntimeError, ValueError) as e:
         print(f"❌ Error: {e}")
+        sys.exit(1)
+
+
+def _create_semantic_scorer_bundle(args, config, questions: List[Dict]):
+    """Create the optional parallel semantic scorer bundle."""
+    if not getattr(args, "semantic", False):
+        return None
+
+    semantic_config = getattr(getattr(config, "scoring", None), "semantic", None)
+    answers_file = (
+        getattr(args, "semantic_answers", None)
+        or getattr(semantic_config, "answers_file", None)
+        or DEFAULT_SEMANTIC_ANSWERS_FILE
+    )
+    model_name = (
+        getattr(args, "semantic_model", None)
+        or getattr(semantic_config, "model", None)
+        or DEFAULT_SEMANTIC_MODEL
+    )
+    thresholds = getattr(semantic_config, "thresholds", None)
+    device = getattr(semantic_config, "device", "auto")
+    max_seq_length = getattr(semantic_config, "max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)
+
+    try:
+        bundle = create_semantic_scorer(
+            questions=questions,
+            answers_file=answers_file,
+            model_name=model_name,
+            thresholds=thresholds,
+            device=device,
+            max_seq_length=max_seq_length,
+        )
+        bundle.scorer.warm_encoder()
+        print(
+            f"✓ Using parallel semantic scoring "
+            f"(model: {model_name}, answers: {answers_file})\n"
+        )
+        return bundle
+    except (RuntimeError, ValueError) as e:
+        print(f"❌ Error initializing semantic scorer: {e}")
         sys.exit(1)
 
 
@@ -492,6 +548,9 @@ def _export_run_config(
         "optimizer_model": getattr(args, "optimizer_model", None),
         "optimizer_endpoint": getattr(args, "optimizer_endpoint", None),
         "max_optimization_iterations": getattr(args, "max_optimization_iterations", None),
+        "semantic": getattr(args, "semantic", None),
+        "semantic_model": getattr(args, "semantic_model", None),
+        "semantic_answers": getattr(args, "semantic_answers", None),
     }
 
 
@@ -655,21 +714,51 @@ def _print_runtime(runtime: RuntimeOptions) -> None:
 
 
 def _print_final_report(results: List[Dict], total_score: float) -> None:
+    semantic_total = weighted_semantic_score(results)
     print("\n" + "=" * 70)
-    print(f"📊 FINAL SCORE: {total_score:.1f}%")
+    if semantic_total is not None:
+        print(
+            f"📊 FINAL SCORE: rubric {total_score:.1f}%  |  "
+            f"semantic {semantic_total:.1f}%"
+        )
+    else:
+        print(f"📊 FINAL SCORE: rubric {total_score:.1f}%")
     print("=" * 70)
-    print(f"{'Q#':<3} {'Category':<25} {'Score':<6} {'Response Snippet'}")
+    if semantic_total is not None:
+        print(
+            f"{'Q#':<3} {'Category':<22} {'Rubric':<7} {'Semantic':<9} "
+            f"{'Response Snippet'}"
+        )
+    else:
+        print(f"{'Q#':<3} {'Category':<25} {'Rubric':<7} {'Response Snippet'}")
     print("-" * 70)
     for r in results:
-        print(f"{r['id']:<3} {r['category']:<25} {r['score']:<6} {r['response_snippet']}")
+        semantic_score = r.get("semantic_score")
+        if semantic_total is not None:
+            semantic_label = (
+                f"{int(semantic_score)}%"
+                if isinstance(semantic_score, (int, float))
+                else "—"
+            )
+            print(
+                f"{r['id']:<3} {r['category']:<22} {r['score']:<7} "
+                f"{semantic_label:<9} {r['response_snippet']}"
+            )
+        else:
+            print(
+                f"{r['id']:<3} {r['category']:<25} {r['score']:<7} "
+                f"{r['response_snippet']}"
+            )
 
-    print("\n✅ Interpretation:")
+    print("\n✅ Interpretation (rubric):")
     if total_score >= 80:
         print("   Model is a strong candidate; review breakdowns before production use.")
     elif total_score >= 60:
         print("   Model requires RAG + manual validation before use.")
     else:
         print("   Model is not suitable for offensive security tasks.")
+    if semantic_total is not None:
+        print("\nℹ️  Semantic score is an independent audit metric vs answers_v2.txt.")
 
 
 def _run_model_with_export(
@@ -682,6 +771,7 @@ def _run_model_with_export(
     args,
     config,
     optimizer=None,
+    semantic_scorer=None,
     reference_answers=None,
     langfuse_config=None,
     multi_model=False,
@@ -696,6 +786,7 @@ def _run_model_with_export(
         scorer_bundle=scorer_bundle,
         runtime=runtime,
         optimizer=optimizer,
+        semantic_scorer=semantic_scorer,
         reference_answers=reference_answers,
         tracer_config=langfuse_config,
         tracer_factory=LangfuseTracer if langfuse_config else None,
@@ -754,6 +845,53 @@ def cmd_list_models(args):
 def cmd_judge(args) -> int:
     """Run offline LLM-as-Judge over saved v2 benchmark results."""
     return run_offline_judge(args)
+
+
+def cmd_preload_semantic(args):
+    """Download and warm the local semantic scoring model and embedding cache."""
+    config = _load_optional_config(args)
+    semantic_config = getattr(getattr(config, "scoring", None), "semantic", None) if config else None
+
+    model_name = (
+        getattr(args, "semantic_model", None)
+        or getattr(semantic_config, "model", None)
+        or DEFAULT_SEMANTIC_MODEL
+    )
+    answers_file = (
+        getattr(args, "semantic_answers", None)
+        or getattr(semantic_config, "answers_file", None)
+        or DEFAULT_SEMANTIC_ANSWERS_FILE
+    )
+    device = getattr(semantic_config, "device", "auto") if semantic_config else "auto"
+    max_seq_length = (
+        getattr(semantic_config, "max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)
+        if semantic_config
+        else DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
+    )
+
+    try:
+        result = preload_semantic_scorer(
+            model_name=model_name,
+            answers_file=answers_file,
+            device=device if device != "auto" else None,
+            max_seq_length=max_seq_length,
+            force=getattr(args, "force", False),
+        )
+    except (RuntimeError, ValueError, FileNotFoundError) as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+
+    print("\n✅ Semantic scoring assets preloaded")
+    print(f"   Model: {result.model_name}")
+    print(f"   Reference answers: {result.reference_count} from {result.answers_file}")
+    if result.encoded_count:
+        print(f"   Newly encoded: {result.encoded_count}")
+    print(f"   Warmup time: {result.elapsed_s:.1f}s")
+    print(f"   Embedding cache: {result.embedding_cache}")
+    print(f"   Hugging Face cache: {result.huggingface_cache}")
+    print("\nLater runs with --semantic will reuse the embedding cache.")
+    print("The embedding model still loads into RAM each process; only download")
+    print("and reference encoding are skipped after preload.")
 
 
 def cmd_interactive(args):
@@ -833,6 +971,7 @@ def cmd_interactive(args):
             sys.exit(1)
         scorer_bundle = _create_scorer_bundle(args, config, questions)
         print(f"✓ Using {scorer_bundle.method_label} scoring\n")
+        semantic_scorer_bundle = _create_semantic_scorer_bundle(args, config, questions)
 
         reference_answers = {}
         if args.optimize_prompts:
@@ -894,6 +1033,11 @@ def cmd_interactive(args):
                                     args=args,
                                     config=config,
                                     optimizer=optimizer,
+                                    semantic_scorer=(
+                                        semantic_scorer_bundle.scorer
+                                        if semantic_scorer_bundle
+                                        else None
+                                    ),
                                     reference_answers=reference_answers,
                                     langfuse_config=langfuse_config,
                                     multi_model=len(selected_model_names) > 1,
@@ -929,14 +1073,23 @@ def cmd_interactive(args):
                                 args.optimizer_model,
                             )
 
+                        semantic_total = weighted_semantic_score(run_result.results)
                         all_results.append(
                             {
                                 "model": model_name,
                                 "score": run_result.total_score,
+                                "semantic_score": semantic_total,
                                 "interpretation": run_result.interpretation,
                             }
                         )
-                        print(f"\n✅ {model_name}: {run_result.total_score:.1f}%\n")
+                        if semantic_total is not None:
+                            print(
+                                f"\n✅ {model_name}: rubric {run_result.total_score:.1f}%  |  "
+                                f"semantic {semantic_total:.1f}%\n"
+                            )
+                        else:
+                            print(f"\n✅ {model_name}: rubric {run_result.total_score:.1f}%\n")
+                        _print_final_report(run_result.results, run_result.total_score)
                     else:
                         print(f"\n❌ No results for {model_name}\n")
 
@@ -956,13 +1109,34 @@ def cmd_interactive(args):
             print("\n" + "=" * 70)
             print("📊 SUMMARY: ALL TESTED MODELS")
             print("=" * 70)
-            print(f"{'Model':<30} {'Score':<10} {'Interpretation'}")
+            show_semantic = any(
+                isinstance(result.get("semantic_score"), (int, float))
+                for result in all_results
+            )
+            if show_semantic:
+                print(f"{'Model':<30} {'Rubric':<10} {'Semantic':<10} {'Interpretation'}")
+            else:
+                print(f"{'Model':<30} {'Rubric':<10} {'Interpretation'}")
             print("-" * 70)
             for result in all_results:
-                print(
-                    f"{result['model']:<30} "
-                    f"{result['score']:<10.1f}% {result['interpretation']}"
-                )
+                if show_semantic:
+                    semantic_score = result.get("semantic_score")
+                    semantic_label = (
+                        f"{semantic_score:.1f}%"
+                        if isinstance(semantic_score, (int, float))
+                        else "—"
+                    )
+                    print(
+                        f"{result['model']:<30} "
+                        f"{result['score']:<10.1f}% "
+                        f"{semantic_label:<10} "
+                        f"{result['interpretation']}"
+                    )
+                else:
+                    print(
+                        f"{result['model']:<30} "
+                        f"{result['score']:<10.1f}% {result['interpretation']}"
+                    )
             print("=" * 70)
         else:
             print("\n❌ No successful tests completed")
@@ -1044,6 +1218,9 @@ def cmd_run_benchmark(args):
                     sys.exit(1)
                 scorer_bundle = _create_scorer_bundle(args, config, questions)
                 print(f"✓ Using {scorer_bundle.method_label} scoring\n")
+                semantic_scorer_bundle = _create_semantic_scorer_bundle(
+                    args, config, questions
+                )
 
                 reference_answers = {}
                 if args.optimize_prompts:
@@ -1074,6 +1251,11 @@ def cmd_run_benchmark(args):
                             args=args,
                             config=config,
                             optimizer=optimizer,
+                            semantic_scorer=(
+                                semantic_scorer_bundle.scorer
+                                if semantic_scorer_bundle
+                                else None
+                            ),
                             reference_answers=reference_answers,
                             langfuse_config=langfuse_config,
                             dataset=dataset,
@@ -1240,6 +1422,30 @@ def _add_optimization_args(parser):
     )
 
 
+def _add_semantic_args(parser):
+    parser.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Enable optional parallel semantic scoring using local embeddings",
+    )
+    parser.add_argument(
+        "--semantic-model",
+        default=None,
+        help=(
+            "Sentence-transformer model for semantic scoring "
+            f"(default: {DEFAULT_SEMANTIC_MODEL})"
+        ),
+    )
+    parser.add_argument(
+        "--semantic-answers",
+        default=None,
+        help=(
+            "Reference answer file for semantic scoring "
+            f"(default: {DEFAULT_SEMANTIC_ANSWERS_FILE})"
+        ),
+    )
+
+
 def _add_benchmark_common_args(parser):
     _add_endpoint_arg(parser)
     _add_export_args(parser)
@@ -1247,6 +1453,7 @@ def _add_benchmark_common_args(parser):
     _add_api_key_arg(parser)
     _add_runtime_args(parser)
     _add_optimization_args(parser)
+    _add_semantic_args(parser)
 
 
 def main():
@@ -1273,6 +1480,10 @@ Examples:
 
   # Run post-hoc LLM-as-Judge over saved v2 results
   uv run run_benchmark.py judge --results "results_*_v2/*.json" --mode disputed
+
+  # Warm local semantic embedding cache before a --semantic run
+  uv sync --extra semantic
+  uv run run_benchmark.py preload-semantic
 
   # Custom endpoint
   uv run run_benchmark.py run ollama -e http://192.168.1.100:11434 -m "mistral"
@@ -1304,6 +1515,30 @@ Examples:
     )
     add_judge_args(parser_judge)
 
+    parser_preload = subparsers.add_parser(
+        "preload-semantic",
+        help="Download and warm the local semantic scoring model in this VM",
+    )
+    parser_preload.add_argument("--config", help="Load configuration from YAML file")
+    parser_preload.add_argument(
+        "--semantic-model",
+        default=None,
+        help=f"Embedding model to preload (default: {DEFAULT_SEMANTIC_MODEL})",
+    )
+    parser_preload.add_argument(
+        "--semantic-answers",
+        default=None,
+        help=(
+            "Reference answer file to preload "
+            f"(default: {DEFAULT_SEMANTIC_ANSWERS_FILE})"
+        ),
+    )
+    parser_preload.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-encode all reference answers even when a cache file exists",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ls":
@@ -1314,6 +1549,8 @@ Examples:
         cmd_interactive(args)
     elif args.command == "judge":
         sys.exit(cmd_judge(args))
+    elif args.command == "preload-semantic":
+        cmd_preload_semantic(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -60,6 +60,10 @@ rubric
 
 Do not add runtime scorer modes for keyword, semantic, hybrid, or online LLM judging. LLM-as-Judge belongs only in the offline `judge` command.
 
+Optional embedded semantic scoring is allowed only as a parallel audit metric. It must not replace rubric scoring or change `score`, `total_score`, interpretation labels, optimizer triggers, or optimizer acceptance. The semantic scorer compares the final selected answer for each question (baseline unless prompt optimization replaces it) to the full-answer reference in `answers_v2.txt`, using local embeddings and granular cosine bands (`100/90/80/70/60/50/40/30/0`). Export semantic data as sibling fields such as `semantic_score`, `semantic_similarity`, and top-level `semantic_scoring`.
+
+Reference embeddings are cached under `.cache/redteam/semantic/` in a file keyed by the full answers corpus digest. The cache stores a per-answer SHA-256 hash alongside each embedding. When an older cache file lacks those hashes (legacy format), `preload-semantic` performs a one-time full re-encode into the new format. After that, only answers whose reference text hash changed are re-encoded; unchanged answers are reused from the current cache file.
+
 The request log is an optional JSONL side artifact selected with `--request-log` or top-level `request_log` in config. It may include prompts, responses, scores, latency, refusal and critical-error flags, and question metadata. It must not include provider headers or API keys.
 
 ### Known limitation: `fatal_errors` substring matching cannot distinguish agreement from critique
@@ -96,6 +100,7 @@ The implementation lives in `benchmark/offline_judge.py`; do not add a separate 
 
 - `weighted_score(results)`
 - `summarize_results(results)`
+- `summarize_semantic_results(results)` for the optional parallel semantic metric
 
 The benchmark exports:
 
@@ -140,7 +145,9 @@ Do not add large batches of questions without rubric criteria.
 
 ## Optional Features
 
-Prompt optimization remains separate from base-model scoring. It runs only after a baseline response scores `0%`; do not mix optimized results into base model comparison tables.
+Prompt optimization remains separate from base-model scoring. It runs only after a baseline response scores **33% or lower**, tries every configured strategy (default: all four) from frozen baseline context, overlaps optimizer generation of strategy *N+1* with target execution of strategy *N*, and keeps the best-scoring attempt. Do not mix optimized results into base model comparison tables.
+
+When `--semantic` is enabled, console final summaries show both rubric and semantic totals per model and per question.
 
 Langfuse tracing is optional and should not be required for local or CI validation.
 

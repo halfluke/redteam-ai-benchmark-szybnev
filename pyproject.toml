@@ -18,6 +18,11 @@ dependencies = [
 dev = [
     "pytest>=9.0.3",
 ]
+semantic = [
+    "numpy",
+    "sentence-transformers",
+    "torch",
+]
 
 [project.scripts]
 redteam-benchmark = "run_benchmark:main"

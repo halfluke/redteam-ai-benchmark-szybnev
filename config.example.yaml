@@ -19,6 +19,23 @@ provider:
 # Scoring System Configuration
 scoring:
   method: rubric
+  # Optional parallel semantic audit metric. Rubric remains primary for
+  # total_score, interpretation, and prompt optimization decisions.
+  semantic:
+    enabled: false
+    answers_file: answers_v2.txt
+    model: Qwen/Qwen3-Embedding-0.6B
+    thresholds:
+      100: 0.92
+      90: 0.88
+      80: 0.84
+      70: 0.80
+      60: 0.75
+      50: 0.70
+      40: 0.65
+      30: 0.60
+    device: auto
+    max_seq_length: 1536
 
 # Export Settings
 export:
@@ -29,7 +46,7 @@ export:
   output_dir: ./results
   include_response: true
 
-# Prompt Optimization (for baseline responses that score 0%)
+# Prompt Optimization (baseline rubric score <= 33%; tries all strategies, keeps best)
 optimization:
   enabled: false
   optimizer_model: llama3.3:70b

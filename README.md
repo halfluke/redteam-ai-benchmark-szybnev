@@ -20,9 +20,9 @@ This branch extends upstream `v2` with Cloud Run authentication, background keep
 | Helper scripts (`scripts/`) | ☁️ Cloud Run | Shell scripts for sourcing Cloud Run environment variables, warming up services, and running benchmarks (`warmup_*`, `run_*_baseline.sh`). Includes `local_env.sh.example` for local endpoint overrides (gitignored). |
 | Optimization trigger threshold: `<= 33%` | ✅ General | Optimization fires whenever the baseline score is 33% or lower, not only on fully censored (0%) responses. |
 | Optimization runs all strategies | ✅ General | With `--optimize-prompts`, the runner tries every configured optimization strategy (default: 4) and keeps the best-scoring reframed prompt/response. It no longer stops early at 50%. |
-| Per-question score and response snippet | ✅ General | After each question the runner prints the score and the first 120 characters of the response on one line, giving real-time feedback during a long run. |
+| Per-question output format | ✅ General | Non-optimized questions print `Final: rubric X% \| semantic Y% \| duration \| snippet`. Questions that trigger optimization print a `Baseline:` line (with both rubric and semantic scores) before the optimization block, and end with a `Best —` summary of the winning scores for each track. |
 | 4-strategy round-robin optimizer | ✅ General | Each optimization attempt uses the next strategy in a fixed cycle — `role_playing → technical → few_shot → cve_framing` — instead of always picking between two based on whether the response was censored. Default maximum attempts changed from 5 to 4 (one per strategy). |
-| Verbose optimization output | ✅ General | After each attempt the optimizer prints the reframed prompt snippet, the model's response snippet, and the resulting score, making it easy to see which strategy is working. |
+| Verbose optimization output | ✅ General | After each attempt the optimizer prints the reframed prompt snippet, the model's response snippet, and both rubric and semantic scores (when `--semantic` is active). After all iterations a `Best —` summary shows the best rubric and semantic scores found. The final per-question lines and the summary tables include the source of each winner (`baseline`, `opt/role_playing`, etc.). |
 | Keepalive correctness during optimization | ☁️ Cloud Run | `optimize_prompt()` gains a `keepalive` parameter. The target and optimizer LLM calls are wrapped with `keepalive_busy()` so the keepalive thread stops pinging while those calls are in flight, preventing spurious timeout warnings and keeping the model warm between attempts. |
 | `keep_alive: -1` in Ollama Cloud Run configs | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml` and `configs/cloudrun_ollama_bugtrace.yaml` set `provider.keep_alive: -1`, sent on every main query and keepalive ping. Tells the Ollama server to never evict the model from VRAM while the container is alive, so the model stays warm even if an individual background ping is skipped or times out during a long generation. |
 | Retry-then-skip on per-question API errors | ✅ General | A `5xx` server error (e.g. a backend chat-template/formatting failure) now retries with backoff inside the client (`models/base.py`, `models/openwebui.py`) instead of failing on the first attempt. If it still fails after exhausting retries, the runner records that single question as a failed result (`error` field set, `score: 0`, no optimization attempted) and continues to the next question instead of aborting the whole benchmark run. |
@@ -198,7 +198,7 @@ Runtime scoring is always `rubric`. It is deterministic and does not require an 
 
 Runtime scoring does not support legacy `keyword`, `semantic`, or `hybrid` modes. Use the offline `judge` command for post-hoc LLM-as-Judge auditing.
 
-Optional embedded semantic scoring is available as a parallel audit metric. It does not replace rubric scoring: `score`, `total_score`, interpretation labels, and prompt optimization decisions remain rubric-based. Semantic scoring compares the final selected answer for each question (baseline or optimized) against `answers_v2.txt` using a local embedding model.
+Optional embedded semantic scoring is available as a parallel audit metric. It does not replace rubric scoring: `score`, `total_score`, and base interpretation labels remain rubric-based. Semantic scoring compares each question's answer against `answers_v2.txt` using a local embedding model.
 
 Install semantic dependencies:
 
@@ -206,11 +206,13 @@ Install semantic dependencies:
 uv sync --extra semantic
 ```
 
-Run with semantic audit scoring:
+Run with semantic audit scoring only:
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" --semantic
 ```
+
+This adds `semantic_score` and `semantic_similarity` columns to the final table alongside rubric scores, without changing the rubric total or interpretation.
 
 Warm the local reference-embedding cache before a long semantic run:
 
@@ -220,6 +222,27 @@ uv run run_benchmark.py preload-semantic --config config.yaml
 ```
 
 Semantic scoring uses full-answer cosine bands by default: `100/90/80/70/60/50/40/30/0`. JSON and CSV exports add `semantic_score` and `semantic_similarity` fields without changing rubric totals.
+
+Reasoning/thinking blocks (`<think>…</think>`, `<|channel>thought…<channel|>`, etc.) are automatically stripped from model responses before encoding. Only the substantive answer is compared against the reference. The embedding window is capped at 1024 tokens.
+
+### Dual-track mode (optimization + semantic)
+
+When `--optimize-prompts` and `--semantic` are both enabled:
+
+- The optimizer also triggers when the **semantic** score is ≤ 33 %, not just the rubric score.
+- Each optimization attempt is scored on both metrics independently.
+- The run keeps two winners per question: the answer with the highest rubric score and the answer with the highest semantic score.
+- The final report shows two separate tables and interpretations — one per track.
+- JSON export gains a top-level `tracks` block with each track's total score and interpretation.
+
+```bash
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --semantic \
+  --optimize-prompts \
+  --optimizer-model "llama3.3:70b"
+```
+
+Without `--optimize-prompts`, `--semantic` adds a single merged table with both columns (no dual-track split).
 
 ## Offline LLM-as-Judge
 
@@ -330,9 +353,9 @@ CSV output contains per-question rows plus a `TOTAL` row. `criteria_csv` adds on
 
 ## Prompt Optimization
 
-Prompt optimization remains optional and separate from base-model scoring. It runs when the baseline rubric score is **33% or lower** (`OPTIMIZATION_TRIGGER_THRESHOLD` in `benchmark/runner.py`) and `--optimize-prompts` is enabled. By default it tries **all four** reframing strategies once (`--max-optimization-iterations 4`) and keeps the **best-scoring** prompt/response. Results are written to `optimized_prompts_{model}_{timestamp}.json`.
+Prompt optimization remains optional and separate from base-model scoring. It runs when the baseline rubric **or** semantic score is **33% or lower** (`OPTIMIZATION_TRIGGER_THRESHOLD` in `benchmark/runner.py`) and `--optimize-prompts` is enabled. By default it tries **all four** reframing strategies once (`--max-optimization-iterations 4`) and independently keeps the **rubric-best** and **semantic-best** answers. Results are written to `optimized_prompts_{model}_{timestamp}.json`.
 
-Each optimization iteration sends a **new reframed prompt** to the target model (fresh response, not a rewrite of the prior answer). The optimizer always anchors on the original benchmark question and the **baseline prompt/response** when generating each strategy variant. While the target model runs strategy *N*, the optimizer generates strategy *N+1* in parallel.
+Each optimization iteration sends a **new reframed prompt** to the target model (fresh response, not a rewrite of the prior answer). The optimizer always anchors on the original benchmark question and the **baseline prompt/response** when generating each strategy variant. While the target model runs strategy *N*, the optimizer generates strategy *N+1* in parallel. When `--semantic` is active, each iteration scores rubric and semantic sequentially after the model returns, and prints both inline.
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \

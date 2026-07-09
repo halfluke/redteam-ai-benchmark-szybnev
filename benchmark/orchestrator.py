@@ -5,7 +5,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 from utils.export import get_interpretation
 
-from .metrics import summarize_results, summarize_semantic_results, weighted_score
+from .metrics import (
+    build_track_results,
+    summarize_results,
+    summarize_semantic_results,
+    summarize_track,
+    weighted_primary_score,
+    weighted_score,
+)
 from .runner import (
     _effective_concurrency,
     _run_questions_concurrent,
@@ -106,6 +113,14 @@ def run_single_model_benchmark(
     semantic_summary = summarize_semantic_results(results)
     if semantic_summary:
         summary["semantic"] = semantic_summary
+
+    has_dual_track = any(r.get("semantic_best") for r in results)
+    if has_dual_track:
+        rubric_track = build_track_results(results, track="rubric")
+        semantic_track = build_track_results(results, track="semantic")
+        summary["rubric_track"] = summarize_track(rubric_track, primary="score")
+        if semantic_track:
+            summary["semantic_track"] = summarize_track(semantic_track, primary="semantic_score")
 
     if tracer:
         tracer.end_benchmark(total_score, interpretation)

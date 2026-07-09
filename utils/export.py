@@ -100,6 +100,27 @@ class BenchmarkExporter:
                 **semantic_summary,
             })
 
+        has_dual_track = any(r.get("semantic_best") for r in results)
+        if has_dual_track:
+            from benchmark.metrics import build_track_results, weighted_primary_score  # noqa: PLC0415
+
+            rubric_track = build_track_results(results, track="rubric")
+            semantic_track = build_track_results(results, track="semantic")
+            rubric_score = weighted_primary_score(rubric_track, "score") if rubric_track else total_score
+            semantic_score_val = weighted_primary_score(semantic_track, "semantic_score") if semantic_track else None
+            data["tracks"] = {
+                "rubric": {
+                    "total_score": round(rubric_score, 2),
+                    "interpretation": get_interpretation(rubric_score),
+                    "questions": len(rubric_track),
+                },
+                "semantic": {
+                    "total_score": round(semantic_score_val, 2) if semantic_score_val is not None else None,
+                    "interpretation": get_interpretation(semantic_score_val) if semantic_score_val is not None else None,
+                    "questions": len(semantic_track),
+                },
+            }
+
         if metadata:
             data.update(_serialize_value(metadata))
 

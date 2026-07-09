@@ -64,6 +64,8 @@ Optional embedded semantic scoring is allowed only as a parallel audit metric. I
 
 Reference embeddings are cached under `.cache/redteam/semantic/` in a file keyed by the full answers corpus digest. The cache stores a per-answer SHA-256 hash alongside each embedding. When an older cache file lacks those hashes (legacy format), `preload-semantic` performs a one-time full re-encode into the new format. After that, only answers whose reference text hash changed are re-encoded; unchanged answers are reused from the current cache file.
 
+Semantic scoring strips reasoning/thinking blocks from model responses before encoding (patterns: `<|channel>thought…<channel|>`, `<think>…</think>`, `<|thinking|>…<|/thinking|>`). Only the substantive answer is passed to the encoder. The embedding window is capped at `DEFAULT_SEMANTIC_MAX_SEQ_LENGTH` (currently 1024 tokens). This improves both accuracy (the reference answers contain no thinking traces) and speed on CPU.
+
 The request log is an optional JSONL side artifact selected with `--request-log` or top-level `request_log` in config. It may include prompts, responses, scores, latency, refusal and critical-error flags, and question metadata. It must not include provider headers or API keys.
 
 ### Known limitation: `fatal_errors` substring matching cannot distinguish agreement from critique
@@ -101,14 +103,21 @@ The implementation lives in `benchmark/offline_judge.py`; do not add a separate 
 - `weighted_score(results)`
 - `summarize_results(results)`
 - `summarize_semantic_results(results)` for the optional parallel semantic metric
-
-The benchmark exports:
-
-- weighted total score
-- metrics such as refusal and critical-error rate
-- breakdowns by difficulty, domain, and capability
+- `build_track_results(results, track="rubric"|"semantic")` — projects each result onto one track's best-scoring answer for dual-track aggregation
+- `summarize_track(results, primary="score"|"semantic_score")` — builds a compact weighted summary (score, question count, breakdowns) for one track
+- `weighted_primary_score(results, primary)` — weighted average for any numeric score field
 
 High scores are labeled `strong-candidate`, not `production-ready`.
+
+### Dual-track reporting
+
+When `--optimize-prompts` and `--semantic` are both active, the optimizer independently tracks the answer with the highest rubric score (`rubric_best`) and the answer with the highest semantic score (`semantic_best`) across all optimization attempts. These are stored on each `QuestionResult` via the `rubric_best`, `semantic_best`, and `tracks_diverged` fields.
+
+The final report shows two separate tables and interpretations: one for the rubric track and one for the semantic track. JSON export gains a top-level `tracks` block with each track's weighted total score and interpretation. The `summary` dict gains `rubric_track` and `semantic_track` sub-keys when dual-track data is present.
+
+The optimization trigger fires when rubric score **or** semantic score is ≤ 33 %. Early exit from the loop occurs only if both scores reach 100 % simultaneously (when `--semantic` is active). Without `--semantic`, the trigger and early exit are rubric-only, matching prior behavior.
+
+Semantic scoring for each optimization attempt is done synchronously after the target model returns: rubric score and semantic score are computed in sequence within the same iteration, then both are printed inline. Next-strategy generation by the optimizer LLM is still overlapped with the target model call using a background thread.
 
 ## Export
 
@@ -145,9 +154,9 @@ Do not add large batches of questions without rubric criteria.
 
 ## Optional Features
 
-Prompt optimization remains separate from base-model scoring. It runs only after a baseline response scores **33% or lower**, tries every configured strategy (default: all four) from frozen baseline context, overlaps optimizer generation of strategy *N+1* with target execution of strategy *N*, and keeps the best-scoring attempt. Do not mix optimized results into base model comparison tables.
+Prompt optimization remains separate from base-model scoring. It runs only after a baseline response scores **33% or lower on rubric or semantic** (see dual-track rules above), tries every configured strategy (default: all four) from frozen baseline context, overlaps optimizer LLM generation of strategy *N+1* with target model execution of strategy *N*, scores rubric and semantic synchronously per iteration (printing both inline), and independently tracks the rubric-best and semantic-best answers. Do not mix optimized results into base model comparison tables.
 
-When `--semantic` is enabled, console final summaries show both rubric and semantic totals per model and per question.
+When `--semantic` is enabled without `--optimize-prompts`, console final summaries show both rubric and semantic totals per model and per question in a single merged table. When both flags are active, two separate tables and judgements are printed.
 
 Langfuse tracing is optional and should not be required for local or CI validation.
 

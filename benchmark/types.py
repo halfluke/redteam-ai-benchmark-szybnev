@@ -69,6 +69,9 @@ class QuestionResult:
     semantic_score: Optional[int] = None
     semantic_similarity: Optional[float] = None
     semantic_scores: Optional[Dict[str, Any]] = None
+    rubric_best: Optional[Dict[str, Any]] = None
+    semantic_best: Optional[Dict[str, Any]] = None
+    tracks_diverged: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the backward-compatible export shape."""
@@ -100,6 +103,12 @@ class QuestionResult:
             result["semantic_similarity"] = self.semantic_similarity
         if self.semantic_scores is not None:
             result["semantic_scores"] = self.semantic_scores
+        if self.rubric_best is not None:
+            result["rubric_best"] = self.rubric_best
+        if self.semantic_best is not None:
+            result["semantic_best"] = self.semantic_best
+        if self.tracks_diverged is not None:
+            result["tracks_diverged"] = self.tracks_diverged
         if self.error is not None:
             result["error"] = self.error
         return result

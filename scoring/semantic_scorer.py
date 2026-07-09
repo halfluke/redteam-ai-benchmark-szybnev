@@ -13,7 +13,16 @@ from .refusal import is_censored_response
 
 DEFAULT_SEMANTIC_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_SEMANTIC_ANSWERS_FILE = "answers_v2.txt"
-DEFAULT_SEMANTIC_MAX_SEQ_LENGTH = 1536
+DEFAULT_SEMANTIC_MAX_SEQ_LENGTH = 1024
+
+# Patterns that mark the start/end of model reasoning/thinking blocks.
+# These are stripped before semantic encoding so the embedding captures
+# only the substantive answer, not the internal reasoning trace.
+_THINKING_PATTERNS: List[tuple[str, str]] = [
+    ("<|channel>thought", "<channel|>"),   # BugTrace / DeepHat-style
+    ("<think>", "</think>"),               # Qwen3, DeepSeek-R1
+    ("<|thinking|>", "<|/thinking|>"),     # generic
+]
 REFERENCE_ENCODE_BATCH_SIZE = 8
 DEFAULT_SEMANTIC_THRESHOLDS: Dict[int, float] = {
     100: 0.92,
@@ -86,6 +95,21 @@ def _to_float_list(vector: Any) -> List[float]:
     if hasattr(vector, "tolist"):
         vector = vector.tolist()
     return [float(value) for value in vector]
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove model reasoning/thinking blocks before semantic encoding."""
+    for start_marker, end_marker in _THINKING_PATTERNS:
+        while True:
+            start = text.find(start_marker)
+            if start == -1:
+                break
+            end = text.find(end_marker, start)
+            if end == -1:
+                text = text[:start].strip()
+                break
+            text = (text[:start] + text[end + len(end_marker):]).strip()
+    return text
 
 
 def _cosine_similarity(a: Iterable[float], b: Iterable[float]) -> float:
@@ -482,7 +506,7 @@ class SemanticScorer(BaseScorer):
                 },
             )
 
-        response_embedding = self._encode([response])[0]
+        response_embedding = self._encode([_strip_thinking_blocks(response)])[0]
         reference_embedding = self._ensure_reference_embedding(q_id)
         similarity = _cosine_similarity(response_embedding, reference_embedding)
         score = self._score_from_similarity(similarity)

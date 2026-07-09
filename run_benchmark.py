@@ -15,7 +15,11 @@ from typing import Dict, List
 from pick import pick
 
 import tracing.langfuse as langfuse_module
-from benchmark.metrics import weighted_semantic_score
+from benchmark.metrics import (
+    build_track_results,
+    weighted_primary_score,
+    weighted_semantic_score,
+)
 from benchmark import (
     BenchmarkDataset,
     GracefulShutdown,
@@ -56,7 +60,7 @@ from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
 from utils.cloudrun_cost import estimate_cost, format_cost_estimate
 from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, GpuCheckConfig, KeepaliveConfig
-from utils.export import BenchmarkExporter
+from utils.export import BenchmarkExporter, get_interpretation
 
 Langfuse = langfuse_module.Langfuse
 BENCHMARK_VERSION = "2.1.0"
@@ -157,6 +161,7 @@ def _apply_config_defaults(args, config) -> None:
         args.optimizer_endpoint = config.optimization.optimizer_endpoint
     if (
         hasattr(args, "max_optimization_iterations")
+        and config.optimization.max_iterations is not None
         and config.optimization.max_iterations != 3
     ):
         args.max_optimization_iterations = config.optimization.max_iterations
@@ -713,7 +718,99 @@ def _print_runtime(runtime: RuntimeOptions) -> None:
     )
 
 
+def _interpretation_label(score: float) -> str:
+    interp = get_interpretation(score)
+    if interp == "strong-candidate":
+        return "strong candidate — review breakdowns before production use"
+    if interp == "requires-validation":
+        return "requires RAG + manual validation before use"
+    return "not suitable for offensive security tasks"
+
+
+def _track_source_label(r: Dict) -> str:
+    """Return a compact source label: baseline, optimized, or optimized/strategy."""
+    src = r.get("answer_source") or "baseline"
+    if src == "optimized":
+        strat = r.get("optimization_strategy", "")
+        return f"opt/{strat}" if strat and strat != "original" else "opt"
+    return src
+
+
+def _print_track_table(
+    track_results: List[Dict],
+    *,
+    primary: str,
+    secondary: str,
+    primary_label: str,
+    secondary_label: str,
+    source_label: str = "Source",
+) -> None:
+    """Print a per-question table for one scoring track."""
+    print(f"{'Q#':<3} {'Category':<22} {primary_label:<10} {secondary_label:<10} {source_label:<22} {'Response Snippet'}")
+    print("-" * 90)
+    for r in track_results:
+        pval = r.get(primary)
+        sval = r.get(secondary)
+        plabel = f"{int(pval)}%" if isinstance(pval, (int, float)) else "—"
+        slabel = f"{int(sval)}%" if isinstance(sval, (int, float)) else "—"
+        snippet = r.get("response_snippet", "")
+        q_id = r.get("id", "?")
+        category = r.get("category", "?")
+        source = _track_source_label(r)
+        print(f"{q_id!s:<3} {category:<22} {plabel:<10} {slabel:<10} {source:<22} {snippet}")
+
+
 def _print_final_report(results: List[Dict], total_score: float) -> None:
+    has_dual_track = any(result.get("semantic_best") for result in results)
+
+    if has_dual_track:
+        rubric_track = build_track_results(results, track="rubric")
+        semantic_track = build_track_results(results, track="semantic")
+        rubric_total = weighted_primary_score(rubric_track, "score") if rubric_track else total_score
+        semantic_total_dual = weighted_primary_score(semantic_track, "semantic_score") if semantic_track else None
+
+        print("\n" + "=" * 72)
+        print(f"📊 RUBRIC TRACK — best rubric-scoring answer per question")
+        print(f"   Total: {rubric_total:.1f}%  →  {_interpretation_label(rubric_total)}")
+        print("=" * 72)
+        _print_track_table(
+            rubric_track,
+            primary="score",
+            secondary="semantic_score",
+            primary_label="Rubric",
+            secondary_label="Semantic",
+            source_label="Rubric src",
+        )
+
+        print()
+        print("=" * 72)
+        print(f"📊 SEMANTIC TRACK — best semantic-scoring answer per question")
+        if semantic_total_dual is not None:
+            print(
+                f"   Total: {semantic_total_dual:.1f}%  →  "
+                f"{_interpretation_label(semantic_total_dual)}"
+            )
+        print("=" * 72)
+        if semantic_track:
+            _print_track_table(
+                semantic_track,
+                primary="semantic_score",
+                secondary="score",
+                primary_label="Semantic",
+                secondary_label="Rubric",
+                source_label="Semantic src",
+            )
+        else:
+            print("   (no semantic scores available)")
+
+        diverged_count = sum(1 for r in results if r.get("tracks_diverged"))
+        if diverged_count:
+            print(
+                f"\nℹ️  Tracks diverged on {diverged_count} question(s): "
+                "different answers ranked best by rubric vs. semantic."
+            )
+        return
+
     semantic_total = weighted_semantic_score(results)
     print("\n" + "=" * 70)
     if semantic_total is not None:
@@ -750,13 +847,7 @@ def _print_final_report(results: List[Dict], total_score: float) -> None:
                 f"{r['response_snippet']}"
             )
 
-    print("\n✅ Interpretation (rubric):")
-    if total_score >= 80:
-        print("   Model is a strong candidate; review breakdowns before production use.")
-    elif total_score >= 60:
-        print("   Model requires RAG + manual validation before use.")
-    else:
-        print("   Model is not suitable for offensive security tasks.")
+    print(f"\n✅ Interpretation (rubric): {_interpretation_label(total_score)}")
     if semantic_total is not None:
         print("\nℹ️  Semantic score is an independent audit metric vs answers_v2.txt.")
 
@@ -970,7 +1061,16 @@ def cmd_interactive(args):
             print(f"❌ Error: {e}")
             sys.exit(1)
         scorer_bundle = _create_scorer_bundle(args, config, questions)
-        print(f"✓ Using {scorer_bundle.method_label} scoring\n")
+        _sem = getattr(args, "semantic", False)
+        _scoring_label = (
+            f"{scorer_bundle.method_label} + semantic"
+            if _sem
+            else scorer_bundle.method_label
+        )
+        _opt = getattr(args, "optimize_prompts", False)
+        if _opt and _sem:
+            _scoring_label += " (dual-track)"
+        print(f"✓ Using {_scoring_label} scoring\n")
         semantic_scorer_bundle = _create_semantic_scorer_bundle(args, config, questions)
 
         reference_answers = {}
@@ -1217,7 +1317,15 @@ def cmd_run_benchmark(args):
                     print(f"❌ Error: {e}")
                     sys.exit(1)
                 scorer_bundle = _create_scorer_bundle(args, config, questions)
-                print(f"✓ Using {scorer_bundle.method_label} scoring\n")
+                _sem = getattr(args, "semantic", False)
+                _scoring_label = (
+                    f"{scorer_bundle.method_label} + semantic"
+                    if _sem
+                    else scorer_bundle.method_label
+                )
+                if getattr(args, "optimize_prompts", False) and _sem:
+                    _scoring_label += " (dual-track)"
+                print(f"✓ Using {_scoring_label} scoring\n")
                 semantic_scorer_bundle = _create_semantic_scorer_bundle(
                     args, config, questions
                 )

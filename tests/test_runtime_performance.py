@@ -707,7 +707,10 @@ def test_semantic_scores_final_optimized_answer(monkeypatch):
     )
 
     assert optimization_results
-    assert semantic_scorer.seen == [(1, "optimized final answer")]
+    # Baseline is scored first (for the optimization trigger check), then the
+    # final optimized answer is re-scored.  Assert the last seen call is for
+    # the winning answer and that the stored result reflects it.
+    assert semantic_scorer.seen[-1] == (1, "optimized final answer")
     assert results[0]["score"] == 100
     assert results[0]["semantic_score"] == 90
     assert results[0]["semantic_scores"]["answer_source"] == "optimized"
@@ -1308,3 +1311,214 @@ def test_export_helper_writes_json_csv_and_preserves_top_level_schema(tmp_path):
     assert payload["scoring_method"] == "rubric"
     csv_header = csv_path.read_text(encoding="utf-8").splitlines()[0]
     assert "response_snippet" not in csv_header
+
+
+# ---------------------------------------------------------------------------
+# Dual-track optimization tests
+# ---------------------------------------------------------------------------
+
+
+def _make_dual_track_result(
+    *,
+    rubric_score: int,
+    semantic_score: int,
+    rubric_best_score: int,
+    semantic_best_score: int,
+    diverged: bool = True,
+) -> dict:
+    """Build a minimal QuestionResult dict with dual-track fields."""
+    rubric_response = "rubric-best response"
+    semantic_response = "semantic-best response" if diverged else rubric_response
+    return {
+        "id": 1,
+        "category": "Test",
+        "score": rubric_best_score,
+        "response_snippet": rubric_response[:80],
+        "full_response": rubric_response,
+        "censored": False,
+        "latency_ms": 100.0,
+        "normalized_score": rubric_best_score / 100,
+        "critical_error": False,
+        "criteria_passed": [],
+        "criteria_failed": [],
+        "evidence": [],
+        "metrics": {},
+        "difficulty": "L1 factual",
+        "domain": "test",
+        "capability": "test",
+        "weight": 1.0,
+        "details": {},
+        "semantic_score": semantic_score,
+        "semantic_similarity": 0.85,
+        "semantic_scores": {"score": semantic_score, "similarity": 0.85},
+        "rubric_best": {
+            "score": rubric_best_score,
+            "semantic_score": semantic_score,
+            "semantic_similarity": 0.85,
+            "semantic_scores": {"score": semantic_score, "similarity": 0.85},
+            "full_response": rubric_response,
+            "response_snippet": rubric_response[:80],
+            "answer_source": "optimized",
+            "prompt": "prompt",
+            "strategy": "role_playing",
+            "iteration": 1,
+            "latency_ms": 100.0,
+        },
+        "semantic_best": {
+            "score": rubric_score,
+            "semantic_score": semantic_best_score,
+            "semantic_similarity": 0.92,
+            "semantic_scores": {"score": semantic_best_score, "similarity": 0.92},
+            "full_response": semantic_response,
+            "response_snippet": semantic_response[:80],
+            "answer_source": "optimized",
+            "prompt": "prompt2",
+            "strategy": "technical",
+            "iteration": 2,
+            "latency_ms": 90.0,
+        },
+        "tracks_diverged": diverged,
+    }
+
+
+def test_build_track_results_rubric():
+    from benchmark.metrics import build_track_results
+
+    result = _make_dual_track_result(
+        rubric_score=40, semantic_score=60, rubric_best_score=80, semantic_best_score=90
+    )
+    rubric_track = build_track_results([result], track="rubric")
+    assert len(rubric_track) == 1
+    assert rubric_track[0]["score"] == 80
+    assert rubric_track[0]["semantic_score"] == 60
+
+
+def test_build_track_results_semantic():
+    from benchmark.metrics import build_track_results
+
+    result = _make_dual_track_result(
+        rubric_score=40, semantic_score=60, rubric_best_score=80, semantic_best_score=90
+    )
+    semantic_track = build_track_results([result], track="semantic")
+    assert len(semantic_track) == 1
+    assert semantic_track[0]["semantic_score"] == 90
+    assert semantic_track[0]["score"] == 40
+
+
+def test_summarize_track_rubric():
+    from benchmark.metrics import build_track_results, summarize_track
+
+    result = _make_dual_track_result(
+        rubric_score=50, semantic_score=70, rubric_best_score=80, semantic_best_score=95
+    )
+    rubric_track = build_track_results([result], track="rubric")
+    summary = summarize_track(rubric_track, primary="score")
+    assert summary["weighted_score"] == 80.0
+    assert summary["questions"] == 1
+    assert "difficulty" in summary["breakdown"]
+
+
+def test_summarize_track_semantic():
+    from benchmark.metrics import build_track_results, summarize_track, weighted_primary_score
+
+    result = _make_dual_track_result(
+        rubric_score=50, semantic_score=70, rubric_best_score=80, semantic_best_score=95
+    )
+    semantic_track = build_track_results([result], track="semantic")
+    summary = summarize_track(semantic_track, primary="semantic_score")
+    assert summary["weighted_score"] == 95.0
+
+
+def test_dual_track_export_json(tmp_path):
+    from utils.export import BenchmarkExporter
+
+    result = _make_dual_track_result(
+        rubric_score=50, semantic_score=70, rubric_best_score=80, semantic_best_score=90
+    )
+    exporter = BenchmarkExporter(output_dir=tmp_path, model_name="test-model")
+    path = exporter.export_json(
+        results=[result],
+        total_score=80.0,
+        interpretation="strong-candidate",
+        scoring_method="rubric",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "tracks" in payload
+    assert payload["tracks"]["rubric"]["total_score"] == 80.0
+    assert payload["tracks"]["semantic"]["total_score"] == 90.0
+    assert payload["tracks"]["rubric"]["interpretation"] == "strong-candidate"
+
+
+def test_dual_track_optimizer_returns_independent_winners(monkeypatch):
+    """optimize_prompt returns separate rubric_best and semantic_best."""
+    import time as _time
+
+    call_count = 0
+
+    class DualClient:
+        def query(self, prompt, max_tokens=1024, retries=3, temperature=0.2):
+            nonlocal call_count
+            call_count += 1
+            return f"response-{call_count}"
+
+    scorer_scores = {
+        "response-1": 10,
+        "response-2": 70,
+        "response-3": 40,
+        "response-4": 50,
+        "response-5": 60,
+    }
+    semantic_scores_map = {
+        "response-1": 20,
+        "response-2": 55,
+        "response-3": 90,
+        "response-4": 65,
+        "response-5": 75,
+    }
+
+    def scorer_func(q_id, response):
+        return scorer_scores.get(response, 0)
+
+    def score_semantic(response, source):
+        s = semantic_scores_map.get(response, 0)
+        return {"score": s, "similarity": s / 100}
+
+    optimizer = PromptOptimizer.__new__(PromptOptimizer)
+    optimizer.history = []
+    optimizer.max_iterations = 4
+    optimizer.strategies = {
+        "role_playing": RolePlayingStrategy(),
+        "technical": TechnicalDecompositionStrategy(),
+        "few_shot": FewShotStrategy(),
+        "cve_framing": CVEFramingStrategy(),
+    }
+
+    def fake_generate(self, *, strategy_name, **kwargs):
+        return f"optimized-{strategy_name}"
+
+    monkeypatch.setattr(PromptOptimizer, "_generate_optimized_prompt", fake_generate)
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+
+    result = optimizer.optimize_prompt(
+        original_prompt="original",
+        target_client=DualClient(),
+        scorer_func=scorer_func,
+        question_id=1,
+        initial_response="response-1",
+        initial_score=10,
+        score_semantic_func=score_semantic,
+    )
+
+    assert "rubric_best" in result
+    assert "semantic_best" in result
+
+    rb = result["rubric_best"]
+    sb = result["semantic_best"]
+
+    assert isinstance(rb, dict)
+    assert isinstance(sb, dict)
+
+    # rubric_best should have highest rubric score (70 from response-2)
+    assert rb["score"] == 70, f"expected 70, got {rb['score']}"
+    # semantic_best should have highest semantic score (90 from response-3)
+    assert sb.get("semantic_score") == 90, f"expected 90, got {sb.get('semantic_score')}"

@@ -1,7 +1,7 @@
 """Aggregate benchmark result metrics."""
 
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Literal
 
 
 def _question_weight(result: Dict[str, Any]) -> float:
@@ -38,7 +38,28 @@ def weighted_semantic_score(results: Iterable[Dict[str, Any]]) -> float | None:
     return weighted_total / total_weight
 
 
-def _breakdown(results: List[Dict[str, Any]], field_name: str) -> Dict[str, Dict[str, Any]]:
+def _primary_score(result: Dict[str, Any], primary: str) -> float:
+    value = result.get(primary)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def weighted_primary_score(results: Iterable[Dict[str, Any]], primary: str) -> float:
+    """Return weighted average for an arbitrary numeric score field."""
+    total_weight = 0.0
+    weighted_total = 0.0
+    for result in results:
+        weight = _question_weight(result)
+        total_weight += weight
+        weighted_total += _primary_score(result, primary) * weight
+    return weighted_total / total_weight if total_weight else 0.0
+
+
+def _breakdown(
+    results: List[Dict[str, Any]],
+    field_name: str,
+    *,
+    primary: str = "score",
+) -> Dict[str, Dict[str, Any]]:
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for result in results:
         value = result.get(field_name) or "unclassified"
@@ -46,7 +67,7 @@ def _breakdown(results: List[Dict[str, Any]], field_name: str) -> Dict[str, Dict
 
     return {
         name: {
-            "score": round(weighted_score(items), 2),
+            "score": round(weighted_primary_score(items, primary), 2),
             "questions": len(items),
         }
         for name, items in sorted(groups.items())
@@ -89,7 +110,7 @@ def summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "critical_error_rate": round(critical_count / total * 100, 2),
         "completeness": _average_metric(results, "completeness"),
         "specificity": _average_metric(results, "specificity"),
-        "hallucination_rate": round(critical_count / total * 100, 2),
+        "hallucination_rate": None,
         "latency_ms_avg": round(sum(latencies) / len(latencies), 2) if latencies else None,
         "tokens_cost": None,
         "stability": None,
@@ -102,6 +123,73 @@ def summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "difficulty": _breakdown(results, "difficulty"),
             "domain": _breakdown(results, "domain"),
             "capability": _breakdown(results, "capability"),
+        },
+    }
+
+
+def build_track_results(
+    results: Iterable[Dict[str, Any]],
+    *,
+    track: Literal["rubric", "semantic"],
+) -> List[Dict[str, Any]]:
+    """Project results onto one track's selected answer.
+
+    The top-level result stays backward-compatible and represents rubric-best.
+    This helper exposes a flat shape for aggregate scoring and final tables.
+    """
+    projected = []
+    key = "rubric_best" if track == "rubric" else "semantic_best"
+    for result in results:
+        best = result.get(key)
+        if not isinstance(best, dict):
+            if track == "semantic" and not isinstance(
+                result.get("semantic_score"), (int, float)
+            ):
+                continue
+            projected.append(dict(result))
+            continue
+
+        item = dict(result)
+        item.update(
+            {
+                "score": best.get("score", result.get("score", 0)),
+                "response_snippet": best.get(
+                    "response_snippet", result.get("response_snippet", "")
+                ),
+                "full_response": best.get(
+                    "full_response", result.get("full_response", "")
+                ),
+                "semantic_score": best.get(
+                    "semantic_score", result.get("semantic_score")
+                ),
+                "semantic_similarity": best.get(
+                    "semantic_similarity", result.get("semantic_similarity")
+                ),
+                "semantic_scores": best.get(
+                    "semantic_scores", result.get("semantic_scores")
+                ),
+                "answer_source": best.get("answer_source"),
+                "optimization_strategy": best.get("strategy"),
+            }
+        )
+        projected.append(item)
+    return projected
+
+
+def summarize_track(
+    results: List[Dict[str, Any]],
+    *,
+    primary: Literal["score", "semantic_score"],
+) -> Dict[str, Any]:
+    """Build a compact weighted summary for one reporting track."""
+    total = weighted_primary_score(results, primary) if results else 0.0
+    return {
+        "weighted_score": round(total, 2),
+        "questions": len(results),
+        "breakdown": {
+            "difficulty": _breakdown(results, "difficulty", primary=primary),
+            "domain": _breakdown(results, "domain", primary=primary),
+            "capability": _breakdown(results, "capability", primary=primary),
         },
     }
 

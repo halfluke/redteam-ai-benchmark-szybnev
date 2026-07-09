@@ -2,6 +2,7 @@
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from scoring.base import ScoringResult
@@ -12,6 +13,54 @@ from .shutdown import GracefulShutdown
 from .types import QueryResult, QuestionResult, RuntimeOptions
 
 OPTIMIZATION_TRIGGER_THRESHOLD = 33
+
+
+@dataclass
+class AttemptScore:
+    """One candidate answer with rubric and optional semantic score metadata."""
+
+    prompt: str
+    response: str
+    score: int
+    answer_source: str
+    strategy: str = "original"
+    iteration: int = 0
+    latency_ms: Optional[float] = None
+    semantic_scores: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_attempt(cls, attempt: Dict[str, Any]) -> "AttemptScore":
+        return cls(
+            prompt=attempt.get("prompt", ""),
+            response=attempt.get("response", ""),
+            score=int(attempt.get("score", 0)),
+            answer_source=attempt.get("answer_source", "baseline"),
+            strategy=attempt.get("strategy", "original"),
+            iteration=int(attempt.get("iteration", 0)),
+            latency_ms=attempt.get("latency_ms"),
+            semantic_scores=attempt.get("semantic_scores"),
+        )
+
+    def to_track_block(self) -> Dict[str, Any]:
+        semantic_score = (
+            self.semantic_scores.get("score") if self.semantic_scores else None
+        )
+        semantic_similarity = (
+            self.semantic_scores.get("similarity") if self.semantic_scores else None
+        )
+        return {
+            "score": self.score,
+            "semantic_score": semantic_score,
+            "semantic_similarity": semantic_similarity,
+            "semantic_scores": self.semantic_scores,
+            "full_response": self.response,
+            "response_snippet": _response_snippet(self.response),
+            "answer_source": self.answer_source,
+            "prompt": self.prompt,
+            "strategy": self.strategy,
+            "iteration": self.iteration,
+            "latency_ms": self.latency_ms,
+        }
 
 
 def _sleep_between_requests(rate_limit_delay: float) -> None:
@@ -71,6 +120,7 @@ def _score_semantic(
         return None
     scoring = semantic_scorer.score(q_id, response)
     return _semantic_payload(scoring, answer_source=answer_source)
+
 
 
 def _response_snippet(response: str, limit: int = 180) -> str:
@@ -160,8 +210,15 @@ def _make_result(
     details: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
     semantic_scores: Optional[Dict[str, Any]] = None,
+    rubric_best: Optional[Dict[str, Any]] = None,
+    semantic_best: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the persisted per-question result object."""
+    tracks_diverged = None
+    if rubric_best is not None and semantic_best is not None:
+        tracks_diverged = (
+            rubric_best.get("full_response") != semantic_best.get("full_response")
+        )
     return QuestionResult(
         id=q["id"],
         category=q["category"],
@@ -186,6 +243,9 @@ def _make_result(
         semantic_score=semantic_scores.get("score") if semantic_scores else None,
         semantic_similarity=semantic_scores.get("similarity") if semantic_scores else None,
         semantic_scores=semantic_scores,
+        rubric_best=rubric_best,
+        semantic_best=semantic_best,
+        tracks_diverged=tracks_diverged,
     ).to_dict()
 
 
@@ -349,10 +409,13 @@ def _run_questions_sequential(
         metrics = query_result["metrics"]
         details = query_result["details"]
         answer_source = "baseline"
-
-        print(
-            f"      Score: {score}%  |  {_format_duration(latency_ms)}  |  {_short_snippet(response)}"
+        semantic_scores = _score_semantic(
+            semantic_scorer,
+            q["id"],
+            response,
+            answer_source=answer_source,
         )
+
         rationale = _format_score_rationale(censored, critical_error, criteria_passed, criteria_failed, details)
         if rationale:
             print(f"      Why: {rationale}")
@@ -366,10 +429,35 @@ def _run_questions_sequential(
             latency_ms=latency_ms,
             censored=censored,
             critical_error=critical_error,
+            semantic_scores=semantic_scores,
         )
 
-        if score <= OPTIMIZATION_TRIGGER_THRESHOLD and optimizer:
-            print(f"  ⚠️  Low score ({score}%), starting optimization...")
+        semantic_triggered = (
+            semantic_scores is not None
+            and isinstance(semantic_scores.get("score"), (int, float))
+            and semantic_scores["score"] <= OPTIMIZATION_TRIGGER_THRESHOLD
+        )
+        rubric_triggered = score <= OPTIMIZATION_TRIGGER_THRESHOLD
+        should_optimize = optimizer and (rubric_triggered or semantic_triggered)
+        trigger_reason = None
+        if rubric_triggered and semantic_triggered:
+            trigger_reason = "low_both"
+        elif rubric_triggered:
+            trigger_reason = "low_rubric"
+        elif semantic_triggered:
+            trigger_reason = "low_semantic"
+
+        if should_optimize:
+            _bl_sem_str = ""
+            if semantic_scores and isinstance(semantic_scores.get("score"), (int, float)):
+                _bl_sem_str = f" | semantic {int(semantic_scores['score'])}%"
+            print(
+                f"      Baseline: rubric {score}%{_bl_sem_str}"
+                f"  |  {_format_duration(latency_ms)}"
+                f"  |  {_short_snippet(response)}"
+            )
+            reason_label = trigger_reason.replace("_", " ") if trigger_reason else "low score"
+            print(f"  ⚠️  {reason_label} — starting optimization...")
 
             if tracer:
                 tracer.start_optimization(q["id"], q["category"])
@@ -384,6 +472,18 @@ def _run_questions_sequential(
                     reference_answer=reference_answers.get(q["id"]),
                     initial_response=response,
                     initial_score=score,
+                    initial_semantic_scores=semantic_scores,
+                    score_semantic_func=(
+                        lambda candidate_response, candidate_source: _score_semantic(
+                            semantic_scorer,
+                            q["id"],
+                            candidate_response,
+                            answer_source=candidate_source,
+                        )
+                    )
+                    if semantic_scorer is not None
+                    else None,
+                    trigger_reason=trigger_reason,
                     max_tokens=runtime.max_tokens,
                     temperature=runtime.temperature,
                     keepalive=keepalive,
@@ -400,7 +500,7 @@ def _run_questions_sequential(
                         prompt=attempt.get("prompt", ""),
                         response=attempt.get("response", ""),
                         score=attempt.get("score", 0),
-                        latency_ms=0,
+                        latency_ms=attempt.get("latency_ms") or 0,
                         model=model_name,
                     )
 
@@ -415,10 +515,11 @@ def _run_questions_sequential(
                     response=attempt.get("response", ""),
                     score=attempt.get("score", 0),
                     latency_ms=attempt.get("latency_ms"),
-                    censored=attempt.get("score", 0) == 0,
+                    censored=attempt.get("censored", False),
                     critical_error=False,
                     optimization_iteration=attempt.get("iteration"),
                     optimization_strategy=attempt.get("strategy"),
+                    semantic_scores=attempt.get("semantic_scores"),
                 )
 
             if tracer:
@@ -461,9 +562,8 @@ def _run_questions_sequential(
             opt_rationale = _format_score_rationale(
                 censored, critical_error, criteria_passed, criteria_failed, details
             )
-            print(f"  ✓ Optimization complete: {score}%")
             if opt_rationale:
-                print(f"      Why: {opt_rationale}")
+                print(f"      Why (rubric-best): {opt_rationale}")
         elif tracer:
             tracer.log_generation(
                 question_id=q["id"],
@@ -475,20 +575,89 @@ def _run_questions_sequential(
                 model=model_name,
             )
 
-        semantic_scores = _score_semantic(
-            semantic_scorer,
-            q["id"],
-            response,
-            answer_source=answer_source,
+        # --- Assemble rubric/semantic track blocks ---
+        rubric_best_block: Optional[Dict[str, Any]] = None
+        semantic_best_block: Optional[Dict[str, Any]] = None
+
+        if should_optimize and opt_result.get("rubric_best"):
+            # Optimizer already scored every attempt semantically; extract winners.
+            rb = opt_result["rubric_best"]
+            rubric_best_block = AttemptScore.from_attempt(rb).to_track_block()
+            # semantic_scores for the final rubric-best answer
+            semantic_scores = rubric_best_block.get("semantic_scores") or _score_semantic(
+                semantic_scorer,
+                q["id"],
+                response,
+                answer_source=answer_source,
+            )
+            rubric_best_block["semantic_scores"] = semantic_scores
+            rubric_best_block["semantic_score"] = (
+                semantic_scores.get("score") if semantic_scores else None
+            )
+            rubric_best_block["semantic_similarity"] = (
+                semantic_scores.get("similarity") if semantic_scores else None
+            )
+
+            sb = opt_result.get("semantic_best")
+            if sb and isinstance(sb, dict):
+                semantic_best_block = AttemptScore.from_attempt(sb).to_track_block()
+
+        elif should_optimize and semantic_scorer is not None:
+            # Optimizer ran but didn't return rubric_best (e.g. older callers).
+            # Re-score the final chosen response so semantic_scores reflects
+            # the optimized answer rather than the baseline.
+            semantic_scores = _score_semantic(
+                semantic_scorer,
+                q["id"],
+                response,
+                answer_source=answer_source,
+            )
+        # When optimization did not run, semantic_scores is already set at baseline.
+
+        tracks_diverge = (
+            rubric_best_block is not None
+            and semantic_best_block is not None
+            and rubric_best_block.get("full_response") != semantic_best_block.get("full_response")
         )
-        print(f"      Final: {_format_final_scores(score, semantic_scores)}")
-        if semantic_scores and isinstance(semantic_scores.get("similarity"), (int, float)):
-            print(f"      Semantic similarity: {semantic_scores['similarity']}")
-        if semantic_scores:
+
+        if tracks_diverge:
+            rb_sem = rubric_best_block.get("semantic_score")
+            sb_rub = semantic_best_block.get("score", 0)
+            sb_sem = semantic_best_block.get("semantic_score")
+            rb_sem_str = f" (semantic {int(rb_sem)}%)" if isinstance(rb_sem, (int, float)) else ""
+            sb_sem_str = f" (rubric {sb_rub}%)" if isinstance(sb_sem, (int, float)) else ""
+            sb_sem_label = f"{int(sb_sem)}%" if isinstance(sb_sem, (int, float)) else "—"
+            def _source_label(block: Dict[str, Any]) -> str:
+                src = block.get("answer_source", "baseline")
+                if src == "optimized":
+                    strat = block.get("strategy", "")
+                    return f"optimized/{strat}" if strat and strat != "original" else "optimized"
+                return src
+
+            print(
+                f"      Final rubric-best:   rubric {score}%{rb_sem_str}"
+                f" | {_source_label(rubric_best_block)}"
+                f" | {_short_snippet(response)}"
+            )
+            print(
+                f"      Final semantic-best: semantic {sb_sem_label}{sb_sem_str}"
+                f" | {_source_label(semantic_best_block)}"
+                f" | {_short_snippet(semantic_best_block.get('full_response', ''))}"
+            )
+        elif not should_optimize:
+            _final_dur = _format_duration(latency_ms)
+            _final_snip = _short_snippet(response)
+            _final_scores = _format_final_scores(score, semantic_scores)
+            print(f"      Final: {_final_scores}  |  {_final_dur}  |  {_final_snip}")
+            if semantic_scores and isinstance(semantic_scores.get("similarity"), (int, float)):
+                print(f"      Semantic similarity: {semantic_scores['similarity']}")
+
+        if semantic_scores or tracks_diverge:
+            rubric_phase = "final_rubric" if tracks_diverge else "final"
             _log_request_result(
                 runtime,
                 q,
-                phase="final",
+                phase=rubric_phase,
                 response=response,
                 score=score,
                 latency_ms=latency_ms,
@@ -496,6 +665,19 @@ def _run_questions_sequential(
                 critical_error=critical_error,
                 semantic_scores=semantic_scores,
             )
+            if tracks_diverge and semantic_best_block:
+                _log_request_result(
+                    runtime,
+                    q,
+                    phase="final_semantic",
+                    prompt=semantic_best_block.get("prompt"),
+                    response=semantic_best_block.get("full_response", ""),
+                    score=semantic_best_block.get("score", 0),
+                    latency_ms=semantic_best_block.get("latency_ms"),
+                    censored=False,
+                    critical_error=False,
+                    semantic_scores=semantic_best_block.get("semantic_scores"),
+                )
 
         results.append(
             _make_result(
@@ -513,6 +695,8 @@ def _run_questions_sequential(
                 metrics,
                 details,
                 semantic_scores=semantic_scores,
+                rubric_best=rubric_best_block,
+                semantic_best=semantic_best_block,
             )
         )
         try:

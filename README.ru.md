@@ -145,7 +145,7 @@ Runtime scorer всегда `rubric`. Он deterministic и не требует 
 
 Legacy режимы `keyword`, `semantic` и `hybrid` для runtime scoring не поддерживаются. Для post-hoc LLM-as-Judge audit используйте отдельную команду `judge`.
 
-Optional embedded semantic scoring доступен как параллельная audit metric. Он не заменяет rubric scoring: `score`, `total_score`, interpretation labels и prompt optimization decisions остаются rubric-based. Semantic scoring сравнивает финальный выбранный ответ по каждому вопросу (baseline или optimized) с `answers_v2.txt` через локальную embedding model.
+Optional embedded semantic scoring доступен как параллельная audit metric. Он не заменяет rubric scoring: `score`, `total_score` и base interpretation labels остаются rubric-based. Semantic scoring сравнивает каждый ответ с эталонами из `answers_v2.txt` через локальную embedding model.
 
 Установка semantic dependencies:
 
@@ -153,11 +153,13 @@ Optional embedded semantic scoring доступен как параллельн�
 uv sync --extra semantic
 ```
 
-Запуск с semantic audit scoring:
+Запуск только с semantic audit scoring:
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" --semantic
 ```
+
+Добавляет колонки `semantic_score` и `semantic_similarity` в итоговую таблицу без изменения rubric-итога.
 
 Прогрев локального reference-embedding cache перед длинным semantic run:
 
@@ -167,6 +169,27 @@ uv run run_benchmark.py preload-semantic --config config.yaml
 ```
 
 По умолчанию semantic scoring использует full-answer cosine bands: `100/90/80/70/60/50/40/30/0`. JSON и CSV exports добавляют `semantic_score` и `semantic_similarity`, не меняя rubric totals.
+
+Reasoning/thinking-блоки (`<think>…</think>`, `<|channel>thought…<channel|>` и аналогичные) автоматически вырезаются из ответов модели перед кодированием — сравнивается только содержательная часть ответа. Окно эмбеддинга ограничено 1024 токенами.
+
+### Dual-track режим (optimization + semantic)
+
+При одновременном использовании `--optimize-prompts` и `--semantic`:
+
+- Оптимизатор также запускается, если **semantic** score ≤ 33%, а не только rubric.
+- Каждая попытка оптимизации независимо оценивается по обоим метрикам.
+- По каждому вопросу сохраняются два победителя: ответ с наивысшим rubric-score и ответ с наивысшим semantic-score.
+- Итоговый отчёт показывает две отдельные таблицы и интерпретации — по одной для каждого трека.
+- JSON-экспорт получает блок `tracks` с общим score и интерпретацией каждого трека.
+
+```bash
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --semantic \
+  --optimize-prompts \
+  --optimizer-model "llama3.3:70b"
+```
+
+Без `--optimize-prompts` флаг `--semantic` добавляет единую объединённую таблицу с обеими колонками (без dual-track разбивки).
 
 ## Offline LLM-as-Judge
 
@@ -277,9 +300,9 @@ CSV содержит строки по вопросам плюс строку `T
 
 ## Prompt Optimization
 
-Prompt optimization остаётся отдельным optional режимом и не смешивается с base-model score. Он запускается, когда baseline rubric score **33% или ниже** (`OPTIMIZATION_TRIGGER_THRESHOLD` в `benchmark/runner.py`) и включён `--optimize-prompts`. По умолчанию он пробует **все четыре** reframing strategy один раз (`--max-optimization-iterations 4`) и сохраняет **лучший** prompt/response. Результаты пишутся в `optimized_prompts_{model}_{timestamp}.json`.
+Prompt optimization остаётся отдельным optional режимом и не смешивается с base-model score. Он запускается, когда baseline rubric **или** semantic score **33% или ниже** (`OPTIMIZATION_TRIGGER_THRESHOLD` в `benchmark/runner.py`) и включён `--optimize-prompts`. По умолчанию он пробует **все четыре** reframing strategy один раз (`--max-optimization-iterations 4`) и независимо сохраняет **лучший rubric-ответ** и **лучший semantic-ответ**. Результаты пишутся в `optimized_prompts_{model}_{timestamp}.json`.
 
-На каждой итерации target model получает **новый reframed prompt**. Optimizer всегда опирается на исходный benchmark question и **baseline prompt/response** при генерации каждой strategy variant. Пока target model выполняет strategy *N*, optimizer параллельно генерирует strategy *N+1*.
+На каждой итерации target model получает **новый reframed prompt**. Optimizer всегда опирается на исходный benchmark question и **baseline prompt/response** при генерации каждой strategy variant. Пока target model выполняет strategy *N*, optimizer параллельно генерирует strategy *N+1*. При активном `--semantic` каждая итерация последовательно вычисляет rubric- и semantic-score после ответа модели и сразу выводит оба значения.
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \

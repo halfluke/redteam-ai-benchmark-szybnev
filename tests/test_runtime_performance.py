@@ -1,3 +1,4 @@
+import csv
 import json
 from types import SimpleNamespace
 
@@ -1447,6 +1448,37 @@ def test_dual_track_export_json(tmp_path):
     assert payload["tracks"]["rubric"]["total_score"] == 80.0
     assert payload["tracks"]["semantic"]["total_score"] == 90.0
     assert payload["tracks"]["rubric"]["interpretation"] == "strong-candidate"
+    assert payload["results"][0]["diverged"] == "D"
+    assert payload["tracks"]["diverged_count"] == 1
+    assert payload["tracks"]["rubric"]["results"][0]["diverged"] == "D"
+    assert payload["tracks"]["semantic"]["results"][0]["diverged"] == "D"
+
+
+def test_diverged_marker_export_csv(tmp_path):
+    from utils.export import BenchmarkExporter
+
+    result = _make_dual_track_result(
+        rubric_score=50, semantic_score=70, rubric_best_score=80, semantic_best_score=90
+    )
+    exporter = BenchmarkExporter(output_dir=tmp_path, model_name="test-model")
+    path = exporter.export_csv(results=[result], total_score=80.0)
+    rows = list(csv.DictReader(path.read_text(encoding="utf-8").splitlines()))
+    assert rows[0]["diverged"] == "D"
+    assert rows[1]["id"] == "TOTAL"
+    assert rows[1]["diverged"] == ""
+
+
+def test_diverged_marker_empty_when_tracks_align():
+    from benchmark.metrics import diverged_marker
+
+    result = _make_dual_track_result(
+        rubric_score=50,
+        semantic_score=70,
+        rubric_best_score=80,
+        semantic_best_score=90,
+        diverged=False,
+    )
+    assert diverged_marker(result) == ""
 
 
 def test_dual_track_optimizer_returns_independent_winners(monkeypatch):

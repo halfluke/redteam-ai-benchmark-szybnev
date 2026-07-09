@@ -17,6 +17,7 @@ from pick import pick
 import tracing.langfuse as langfuse_module
 from benchmark.metrics import (
     build_track_results,
+    diverged_marker,
     weighted_primary_score,
     weighted_semantic_score,
 )
@@ -746,8 +747,11 @@ def _print_track_table(
     source_label: str = "Source",
 ) -> None:
     """Print a per-question table for one scoring track."""
-    print(f"{'Q#':<3} {'Category':<22} {primary_label:<10} {secondary_label:<10} {source_label:<22} {'Response Snippet'}")
-    print("-" * 90)
+    print(
+        f"{'Q#':<3} {'D':<2} {'Category':<22} {primary_label:<10} {secondary_label:<10} "
+        f"{source_label:<22} {'Response Snippet'}"
+    )
+    print("-" * 92)
     for r in track_results:
         pval = r.get(primary)
         sval = r.get(secondary)
@@ -757,7 +761,11 @@ def _print_track_table(
         q_id = r.get("id", "?")
         category = r.get("category", "?")
         source = _track_source_label(r)
-        print(f"{q_id!s:<3} {category:<22} {plabel:<10} {slabel:<10} {source:<22} {snippet}")
+        diverged = diverged_marker(r)
+        print(
+            f"{q_id!s:<3} {diverged:<2} {category:<22} {plabel:<10} {slabel:<10} "
+            f"{source:<22} {snippet}"
+        )
 
 
 def _print_final_report(results: List[Dict], total_score: float) -> None:
@@ -807,7 +815,8 @@ def _print_final_report(results: List[Dict], total_score: float) -> None:
         if diverged_count:
             print(
                 f"\nℹ️  Tracks diverged on {diverged_count} question(s): "
-                "different answers ranked best by rubric vs. semantic."
+                "different answers ranked best by rubric vs. semantic "
+                "(marked with D in the tables below)."
             )
         return
 

@@ -9,6 +9,11 @@ def _question_weight(result: Dict[str, Any]) -> float:
     return float(weight) if isinstance(weight, (int, float)) and weight > 0 else 1.0
 
 
+def diverged_marker(result: Dict[str, Any]) -> str:
+    """Return ``D`` when rubric-best and semantic-best answers differ."""
+    return "D" if result.get("tracks_diverged") else ""
+
+
 def weighted_score(results: Iterable[Dict[str, Any]]) -> float:
     """Return weighted average score across question results."""
     total_weight = 0.0

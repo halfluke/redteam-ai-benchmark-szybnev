@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from benchmark.metrics import build_track_results, diverged_marker
+
 
 def _serialize_value(value: Any) -> Any:
     """Recursively serialize a value for JSON export."""
@@ -90,7 +92,13 @@ class BenchmarkExporter:
             "total_score": round(total_score, 2),
             "interpretation": interpretation,
             "summary": _serialize_value(summary or {}),
-            "results": [_serialize_value(r) for r in results],
+            "results": [
+                {
+                    **_serialize_value(r),
+                    "diverged": diverged_marker(r),
+                }
+                for r in results
+            ],
         }
         semantic_summary = (summary or {}).get("semantic") if summary else None
         if semantic_summary:
@@ -102,23 +110,39 @@ class BenchmarkExporter:
 
         has_dual_track = any(r.get("semantic_best") for r in results)
         if has_dual_track:
-            from benchmark.metrics import build_track_results, weighted_primary_score  # noqa: PLC0415
+            from benchmark.metrics import weighted_primary_score  # noqa: PLC0415
 
             rubric_track = build_track_results(results, track="rubric")
             semantic_track = build_track_results(results, track="semantic")
             rubric_score = weighted_primary_score(rubric_track, "score") if rubric_track else total_score
             semantic_score_val = weighted_primary_score(semantic_track, "semantic_score") if semantic_track else None
+
+            def _track_export_row(row: Dict[str, Any]) -> Dict[str, Any]:
+                return {
+                    "id": row.get("id"),
+                    "category": row.get("category"),
+                    "score": row.get("score"),
+                    "semantic_score": row.get("semantic_score"),
+                    "answer_source": row.get("answer_source"),
+                    "optimization_strategy": row.get("optimization_strategy"),
+                    "diverged": diverged_marker(row),
+                    "response_snippet": row.get("response_snippet"),
+                }
+
             data["tracks"] = {
                 "rubric": {
                     "total_score": round(rubric_score, 2),
                     "interpretation": get_interpretation(rubric_score),
                     "questions": len(rubric_track),
+                    "results": [_track_export_row(r) for r in rubric_track],
                 },
                 "semantic": {
                     "total_score": round(semantic_score_val, 2) if semantic_score_val is not None else None,
                     "interpretation": get_interpretation(semantic_score_val) if semantic_score_val is not None else None,
                     "questions": len(semantic_track),
+                    "results": [_track_export_row(r) for r in semantic_track],
                 },
+                "diverged_count": sum(1 for r in results if r.get("tracks_diverged")),
             }
 
         if metadata:
@@ -155,6 +179,7 @@ class BenchmarkExporter:
         # Define columns
         columns = [
             "id",
+            "diverged",
             "category",
             "score",
             "censored",
@@ -175,6 +200,7 @@ class BenchmarkExporter:
             for result in results:
                 row = {
                     "id": result.get("id", ""),
+                    "diverged": diverged_marker(result),
                     "category": result.get("category", ""),
                     "score": result.get("score", 0),
                     "censored": result.get("censored", False),
@@ -201,6 +227,7 @@ class BenchmarkExporter:
             # Write summary row
             writer.writerow({
                 "id": "TOTAL",
+                "diverged": "",
                 "category": "",
                 "score": round(total_score, 2),
                 "censored": "",

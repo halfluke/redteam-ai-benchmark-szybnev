@@ -164,7 +164,11 @@ def build_track_results(
             if track == "semantic" and not isinstance(
                 result.get("semantic_score"), (int, float)
             ):
-                continue
+                # Keep API/transport errors (error field set) so both tracks
+                # have identical question counts; score and semantic_score are
+                # already 0 / None from _make_error_result.
+                if result.get("error") is None:
+                    continue
             projected.append(dict(result))
             continue
 

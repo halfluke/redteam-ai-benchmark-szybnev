@@ -491,6 +491,29 @@ def _run_questions_sequential(
             except GracefulShutdown:
                 print("  ⚠️  Graceful shutdown during prompt optimization.")
                 break
+            except RuntimeError as e:
+                print(f"   ❌ Optimizer error [{model_name}] Q{q['id']}: {e}")
+                print("  ⚠️  Keeping baseline result and continuing...")
+                if tracer:
+                    tracer.end_optimization(success=False, best_score=score, iterations=0)
+                results.append(
+                    _make_result(
+                        q,
+                        score=score,
+                        response=response,
+                        censored=censored,
+                        critical_error=critical_error,
+                        criteria_passed=criteria_passed,
+                        criteria_failed=criteria_failed,
+                        evidence=evidence,
+                        metrics=metrics,
+                        details=details,
+                        latency_ms=latency_ms,
+                        semantic_scores=semantic_scores,
+                        error=f"optimizer_error: {e}",
+                    )
+                )
+                continue
 
             if tracer and opt_result.get("history"):
                 for attempt in opt_result["history"]:

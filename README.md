@@ -1,6 +1,6 @@
 # Red Team AI Benchmark
 
-> **Branch note:** `feature/cloudrun-v2` is based on upstream `main` at version **2.1.0** (`0b2e68e`). Upstream `main` is now **2.3.0**; this branch has not been rebased or merged with those changes yet.
+> **Branch note:** `feature/cloudrun-v2` has selectively merged the upstream v2.3.0 scoring layer (`rubric-v2.1.0` negation heuristics, refusal detector improvements, dataset 2.3.0 patterns). Runner, optimizer, repeats/seed, and leaderboard changes from upstream v2.3.0 have not been merged; this branch adds Cloud Run auth, keepalive, dual-track semantic scoring, and optimizer fixes not present in upstream.
 
 **Russian version:** [README.ru.md](README.ru.md)
 
@@ -323,9 +323,9 @@ JSON export includes model results, per-question rubric evidence, aggregate summ
   "scoring_method": "rubric",
   "total_score": 75.0,
   "interpretation": "requires-validation",
-  "benchmark_version": "2.1.0",
+  "benchmark_version": "2.3.0",
   "dataset_id": "redteam-ai-benchmark-v2",
-  "dataset_version": "2.0.0",
+  "dataset_version": "2.1.0",
   "dataset_hash": "...",
   "scorer_version": "rubric",
   "config_hash": "...",
@@ -335,7 +335,7 @@ JSON export includes model results, per-question rubric evidence, aggregate summ
     "profile": "standard"
   },
   "git_commit": "...",
-  "package_version": "2.1.0",
+  "package_version": "2.3.0",
   "runtime_profile": "standard",
   "summary": {
     "metrics": {

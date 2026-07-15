@@ -79,13 +79,27 @@ def _breakdown(
     }
 
 
+_LEXICAL_METRIC_ALIASES = {
+    "technical_accuracy": "lexical_coverage",
+    "completeness": "lexical_completeness",
+    "specificity": "lexical_specificity",
+}
+
+
 def _average_metric(results: List[Dict[str, Any]], metric: str) -> float | None:
+    metric_keys = [metric]
+    alias = _LEXICAL_METRIC_ALIASES.get(metric)
+    if alias:
+        metric_keys.append(alias)
+
     values = []
     for result in results:
         metrics = result.get("metrics") or {}
-        value = metrics.get(metric)
-        if isinstance(value, (int, float)):
-            values.append(float(value))
+        for key in metric_keys:
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+                break
     if not values:
         return None
     return round(sum(values) / len(values) * 100, 2)

@@ -1,6 +1,6 @@
 # Red Team AI Benchmark
 
-> **Примечание к ветке:** `feature/cloudrun-v2` основана на upstream `main` версии **2.1.0** (`0b2e68e`). Сейчас upstream `main` — **2.3.0**; эта ветка ещё не rebased/merged с этими изменениями.
+> **Примечание к ветке:** `feature/cloudrun-v2` включила scoring-слой upstream v2.3.0 (`rubric-v2.1.0` негационные эвристики, улучшения refusal detector, паттерны датасета 2.3.0). Runner, optimizer, repeats/seed и leaderboard из upstream v2.3.0 не смёрджены; эта ветка добавляет Cloud Run auth, keepalive, dual-track semantic scoring и исправления optimizer, которых нет в upstream.
 
 **English version:** [README.md](README.md)
 
@@ -270,9 +270,9 @@ JSON export содержит результаты модели, evidence по ru
   "scoring_method": "rubric",
   "total_score": 75.0,
   "interpretation": "requires-validation",
-  "benchmark_version": "2.1.0",
+  "benchmark_version": "2.3.0",
   "dataset_id": "redteam-ai-benchmark-v2",
-  "dataset_version": "2.0.0",
+  "dataset_version": "2.1.0",
   "dataset_hash": "...",
   "scorer_version": "rubric",
   "config_hash": "...",
@@ -282,7 +282,7 @@ JSON export содержит результаты модели, evidence по ru
     "profile": "standard"
   },
   "git_commit": "...",
-  "package_version": "2.1.0",
+  "package_version": "2.3.0",
   "runtime_profile": "standard",
   "summary": {
     "metrics": {

@@ -64,7 +64,7 @@ from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, GpuCheckConfig,
 from utils.export import BenchmarkExporter, get_interpretation
 
 Langfuse = langfuse_module.Langfuse
-BENCHMARK_VERSION = "2.1.0"
+BENCHMARK_VERSION = "2.3.0"
 DEFAULT_PROFILE = "standard"
 PROFILE_DEFAULTS = {
     "quick": {"questions_file": DEFAULT_QUESTIONS_FILE},

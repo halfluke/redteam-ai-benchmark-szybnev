@@ -29,6 +29,7 @@ def question(q_id, *, difficulty="L1 factual", tags=None, weight=1.0):
         "acceptable_variants": [],
         "tags": tags or [],
         "weight": weight,
+        "profiles": ["standard"],
     }
 
 
@@ -38,7 +39,8 @@ def write_dataset(path, questions):
             "record_type": "manifest",
             "schema": "rubric-v2",
             "dataset_id": "test-dataset",
-            "dataset_version": "2.0.0",
+            "dataset_version": "2.1.0",
+            "benchmark_version": "2.3.0",
         },
         *questions,
     ]

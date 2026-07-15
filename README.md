@@ -1,5 +1,7 @@
 # Red Team AI Benchmark
 
+> **Branch note:** `feature/cloudrun-v2` is based on upstream `main` at version **2.1.0** (`0b2e68e`). Upstream `main` is now **2.3.0**; this branch has not been rebased or merged with those changes yet.
+
 **Russian version:** [README.ru.md](README.ru.md)
 
 Red Team AI Benchmark is a CLI benchmark for choosing base LLMs for authorized red-team and offensive-security work. Version 2 uses a rubric-based dataset instead of judging answers only against one golden response.

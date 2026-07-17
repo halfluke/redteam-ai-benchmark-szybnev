@@ -931,6 +931,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "tenacity" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -961,6 +962,7 @@ requires-dist = [
     { name = "sentence-transformers", marker = "extra == 'semantic'" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "torch", marker = "extra == 'semantic'" },
+    { name = "tqdm", specifier = ">=4.66.0" },
 ]
 provides-extras = ["dev", "semantic"]
 

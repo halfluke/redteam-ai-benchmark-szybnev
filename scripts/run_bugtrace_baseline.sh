@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BugTrace Cloud Run — full v2 rubric benchmark (60 questions, max_tokens=4096).
+# BugTrace Cloud Run — full v2 rubric benchmark (60 questions, max_tokens=3072).
 # Auth: automatic Cloud Run identity token via gcloud.
 # Keepalive pings the service every 60s between questions.
 #

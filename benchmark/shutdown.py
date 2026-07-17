@@ -11,6 +11,12 @@ class GracefulShutdown(Exception):
     """Raised to stop benchmark work while preserving completed results."""
 
 
+def check_shutdown(shutdown_requested: Optional[Callable[[], bool]] = None) -> None:
+    """Raise ``GracefulShutdown`` when a signal handler marked shutdown requested."""
+    if shutdown_requested and shutdown_requested():
+        raise GracefulShutdown
+
+
 @dataclass
 class ShutdownState:
     """Signal-aware shutdown token shared across benchmark layers."""
@@ -19,12 +25,11 @@ class ShutdownState:
     signum: Optional[int] = None
 
     def request(self, signum: Optional[int] = None) -> None:
-        """Mark shutdown as requested; a second request interrupts immediately."""
+        """Mark shutdown requested; a second request raises ``KeyboardInterrupt``."""
         if self.requested:
             raise KeyboardInterrupt
         self.requested = True
         self.signum = signum
-        raise GracefulShutdown
 
     def is_requested(self) -> bool:
         """Return whether graceful shutdown has been requested."""

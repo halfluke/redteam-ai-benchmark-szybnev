@@ -12,13 +12,14 @@ Supported providers:
 - `lmstudio`: OpenAI-compatible LM Studio API, default `http://localhost:1234`
 - `openwebui`: OpenAI-compatible OpenWebUI API, default `http://localhost:3000`
 - `openrouter`: OpenAI-compatible cloud API, default `https://openrouter.ai/api/v1`
+- `deepinfra`: OpenAI-compatible DeepInfra API, default `https://api.deepinfra.com/v1/openai`
 
 Primary implementation files:
 
 - `run_benchmark.py`: CLI, benchmark orchestration, prompt optimization, Langfuse tracing
 - `benchmark/`: dataset loading, runtime execution, metrics, shutdown handling, offline judge
 - `models/`: provider clients and `create_client()`
-- `optimization/`: prompt optimization helpers
+- `optimization/`: prompt optimization helpers (`prompts.py`, trigger/exit policy in `policy.py`)
 - `scoring/`: deterministic rubric scorer
 - `tracing/`: optional Langfuse tracing adapter
 - `utils/config.py`: YAML config loading
@@ -45,6 +46,8 @@ Full background reference lives in `docs/agent-reference.md`. User-facing docs l
 - Do not write "Generated with Codex", "Generated with Claude", or similar attribution.
 
 ## Common Commands
+
+Run all CLI commands from the repository root. Dataset paths, answer files, configs, and default export/cache dirs are cwd-relative; a wheel/`redteam-benchmark` install does not embed those data files.
 
 Install dependencies:
 
@@ -94,8 +97,16 @@ Run with prompt optimization:
 
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \
-  --optimize-prompts \
+  --optimizer-provider ollama \
   --optimizer-model "llama3.3:70b"
+
+# DeepInfra optimizer (requires DEEPINFRA_TOKEN or --optimizer-api-key)
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --optimizer-provider deepinfra \
+  --optimizer-model "deepseek-ai/DeepSeek-V3"
+
+# Skip optimization when configured in YAML
+uv run run_benchmark.py run ollama -m "llama3.1:8b" --config config.yaml --no-optimize
 ```
 
 Run with config:
@@ -104,11 +115,22 @@ Run with config:
 uv run run_benchmark.py run ollama -m "llama3.1:8b" --config config.yaml
 ```
 
-Warm local semantic embedding cache (requires `uv sync --extra semantic`):
+Warm semantic embedding cache before a long `--semantic` run:
 
 ```bash
+# Local SentenceTransformer (requires uv sync --extra semantic)
 uv run run_benchmark.py preload-semantic
+
+# DeepInfra reference cache (requires DEEPINFRA_TOKEN)
+uv run run_benchmark.py preload-semantic --semantic-provider deepinfra
 uv run run_benchmark.py preload-semantic --config config.yaml
+```
+
+DeepInfra semantic scoring during a benchmark run:
+
+```bash
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --semantic --semantic-provider deepinfra
 ```
 
 Useful checks:
@@ -168,7 +190,11 @@ When changing config:
 
 ## Optional Features
 
-Prompt optimization only triggers on baseline responses that score **33% or lower**. It uses an optimizer model to reframe prompts from the frozen baseline context (original question + baseline response), tries every configured strategy (default: all four) with pipelined generation, keeps the best-scoring attempt, and writes `optimized_prompts_{model}_{timestamp}.json` when optimization results exist.
+Prompt optimization only triggers on baseline responses that score **below 25% on rubric or semantic**, or when semantic scoring is skipped as **garbage**. Enable it by setting both `--optimizer-provider` and `--optimizer-model` (CLI or `optimization:` in config). Supported optimizer providers: `ollama`, `lmstudio`, `openwebui`, `openrouter`, `deepinfra`. Cloud providers require an API key at init (`--optimizer-api-key` or `OPENROUTER_API_KEY` / `DEEPINFRA_TOKEN`). Before the first question, the runner validates that both target and optimizer model names exist in the provider's model list and aborts with a clear error if not.
+
+It uses an optimizer model to reframe prompts from the frozen baseline context (original question + baseline response), tries every configured strategy (default: all four, up to `--max-optimization-iterations`) with pipelined generation, stops early once **both rubric-best and semantic-best scores are ≥ 75%** (semantic must not be garbage; see `optimization_tracks_resolved()` in `optimization/policy.py`), keeps the best-scoring attempt, and writes `optimized_prompts_{model}_{timestamp}.json` when optimization results exist.
+
+Semantic scoring (optional `--semantic`) supports `local` (SentenceTransformer, default `Qwen/Qwen3-Embedding-0.6B`, encode cap 2048) and `deepinfra` (`Qwen/Qwen3-Embedding-8B` via `DEEPINFRA_TOKEN`, encode cap 3072). DeepInfra optimizer runs use `optimization_max_tokens: 3072` by default (matching target `max_tokens`).
 
 Langfuse tracing is optional and configured through `config.yaml`. It records benchmark spans, question spans, optimization attempts, scores, payloads, and latency metadata.
 
@@ -179,6 +205,7 @@ The `local-only` profile must not require LLM judge access.
 ## Documentation Policy
 
 - Keep `README.md` and `README.ru.md` focused on user-facing usage.
+- **`README.md` and `README.ru.md` must stay in sync:** same sections, features, CLI examples, and config snippets; only the language differs. Never update one without updating the other in the same task.
 - Keep this file short and agent-focused.
 - Put longer implementation notes in `docs/agent-reference.md`.
 - If code behavior changes, sync documentation in the same task.

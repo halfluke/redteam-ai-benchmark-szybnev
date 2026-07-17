@@ -11,7 +11,7 @@ from .runner import (
     _run_questions_sequential,
     _sleep_between_requests,
 )
-from .shutdown import GracefulShutdown, ShutdownState, install_signal_handlers
+from .shutdown import GracefulShutdown, ShutdownState, check_shutdown, install_signal_handlers
 from .types import BenchmarkRunResult, QueryResult, QuestionResult, RuntimeOptions
 
 __all__ = [

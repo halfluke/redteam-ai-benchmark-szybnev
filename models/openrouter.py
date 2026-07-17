@@ -3,7 +3,7 @@
 import os
 from typing import Dict, List, Optional
 
-from .base import APIClient
+from .base import APIClient, normalize_message_content
 
 # Optional httpx support
 try:
@@ -31,18 +31,21 @@ class OpenRouterClient(APIClient):
         model_name: str = "anthropic/claude-3.5-sonnet",
         api_key: Optional[str] = None,
         timeout: int = 120,
+        api_key_env: str = "OPENROUTER_API_KEY",
     ):
         """
-        Initialize OpenRouter client.
+        Initialize OpenRouter-compatible client.
 
         Args:
-            base_url: OpenRouter API URL (default: https://openrouter.ai/api/v1)
+            base_url: API URL (default: https://openrouter.ai/api/v1)
             model_name: Model ID (e.g., "anthropic/claude-3.5-sonnet")
-            api_key: OpenRouter API key (or set OPENROUTER_API_KEY env var)
+            api_key: API key (or set ``api_key_env``)
             timeout: Request timeout in seconds
+            api_key_env: Environment variable used when ``api_key`` is omitted
         """
         super().__init__(base_url, model_name)
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self.api_key_env = api_key_env
+        self.api_key = api_key or os.environ.get(api_key_env)
         self.timeout = timeout
 
         if not HTTPX_AVAILABLE:
@@ -53,8 +56,7 @@ class OpenRouterClient(APIClient):
 
         if not self.api_key:
             raise RuntimeError(
-                "OpenRouter API key required. "
-                "Set OPENROUTER_API_KEY environment variable or pass api_key parameter."
+                f"API key required. Set {api_key_env} or pass api_key parameter."
             )
 
         self.client = httpx.Client(timeout=self.timeout)
@@ -119,15 +121,24 @@ class OpenRouterClient(APIClient):
         }
 
         try:
-            data = self._make_request(payload, retries=retries)
-            return data["choices"][0]["message"]["content"]
+            with self._request_lock:
+                data = self._make_request(payload, retries=retries)
+            return normalize_message_content(data["choices"][0]["message"]["content"])
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
                 f"OpenRouter API error {e.response.status_code}: {e.response.text}"
             ) from e
+        except httpx.TimeoutException as e:
+            raise RuntimeError(
+                f"OpenRouter API timeout talking to {self.base_url}"
+            ) from e
         except httpx.ConnectError as e:
             raise RuntimeError(
                 f"Cannot connect to OpenRouter at {self.base_url}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(
+                f"OpenRouter request failed: {e}"
             ) from e
         except KeyError as e:
             raise RuntimeError(f"Invalid API response format: {e}") from e

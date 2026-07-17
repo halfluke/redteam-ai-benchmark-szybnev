@@ -23,8 +23,14 @@ scoring:
   # total_score, interpretation, and prompt optimization decisions.
   semantic:
     enabled: false
+    provider: local  # local (SentenceTransformer) or deepinfra (Qwen3-Embedding-8B API)
     answers_file: answers_v2.txt
     model: Qwen/Qwen3-Embedding-0.6B
+    # DeepInfra example (requires DEEPINFRA_TOKEN):
+    # provider: deepinfra
+    # model: Qwen/Qwen3-Embedding-8B
+    # api_key_env: DEEPINFRA_TOKEN
+    # Omit thresholds to use recalibrated 8B defaults (see scoring/semantic_calibration.py).
     thresholds:
       100: 0.92
       90: 0.88
@@ -35,7 +41,7 @@ scoring:
       40: 0.65
       30: 0.60
     device: auto
-    max_seq_length: 1536
+    max_seq_length: 2048  # local default; deepinfra defaults to 3072 when omitted
 
 # Export Settings
 export:
@@ -46,12 +52,14 @@ export:
   output_dir: ./results
   include_response: true
 
-# Prompt Optimization (baseline rubric score <= 33%; tries all strategies, keeps best)
+# Prompt Optimization (baseline rubric or semantic below 25%, or semantic garbage)
 optimization:
-  enabled: false
-  optimizer_model: llama3.3:70b
+  optimizer_provider: ollama          # or: deepinfra, openrouter, lmstudio, openwebui
+  optimizer_model: llama3.3:70b       # e.g. deepseek-ai/DeepSeek-V3 for deepinfra
   # optimizer_endpoint: http://localhost:11434  # Optional custom endpoint
-  max_iterations: 3
+  # optimizer_api_key: ...            # for deepinfra/openrouter; prefer env var instead
+  max_iterations: 4
+  optimization_max_tokens: 3072       # deepinfra default; local optimizers use 2048 when omitted
   strategies:
     - role_playing
     - technical
@@ -64,11 +72,11 @@ optimization:
 # if too little of it is GPU-resident. Catches silent CPU fallback on Ollama
 # GPU deployments (e.g. a broken/misconfigured Cloud Run GPU backend) before
 # it burns a full run's worth of time and money. Only measurable for Ollama
-# clients; skipped for other providers.
+# clients; aborts when enabled but the probe cannot complete.
 # gpu_check:
 #   enabled: false
 #   min_vram_fraction: 0.9
-#   timeout_s: 120
+#   timeout_s: 210
 
 # Estimated Cloud Run cost, printed once at the end of the run (or once per
 # model in `interactive` mode). This is an ESTIMATE from published on-demand
@@ -87,7 +95,7 @@ optimization:
 questions_file: datasets/v2/benchmark.jsonl
 answers_file: answers_all.txt
 rate_limit_delay: 1.5
-max_tokens: 1024
+max_tokens: 3072
 temperature: 0.2
 concurrency: 1
 # request_log: ./results/requests.jsonl  # Optional append-only per-question JSONL log

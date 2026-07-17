@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from .base import APIClient
+from .base import APIClient, normalize_message_content
 
 
 class OpenWebUIClient(APIClient):
@@ -65,16 +65,20 @@ class OpenWebUIClient(APIClient):
             "stream": False,
         }
 
+        headers = self._get_headers()
         for attempt in range(retries):
             try:
-                response = self.session.post(
-                    url,
-                    headers=self._get_headers(),
-                    json=payload,
-                    timeout=self.timeout,
-                )
+                with self._request_lock:
+                    response = self.session.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.timeout,
+                    )
                 response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"]
+                return normalize_message_content(
+                    response.json()["choices"][0]["message"]["content"]
+                )
 
             except requests.exceptions.Timeout:
                 print(f"   Timeout on attempt {attempt + 1}/{retries}")
@@ -85,9 +89,12 @@ class OpenWebUIClient(APIClient):
                 time.sleep(2**attempt)
 
             except requests.exceptions.ConnectionError as e:
-                raise RuntimeError(
-                    f"Cannot connect to OpenWebUI at {self.base_url}. Is it running?"
-                ) from e
+                print(f"   Connection error on attempt {attempt + 1}/{retries}")
+                if attempt == retries - 1:
+                    raise RuntimeError(
+                        f"Cannot connect to OpenWebUI at {self.base_url}. Is it running?"
+                    ) from e
+                time.sleep(2**attempt)
 
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code

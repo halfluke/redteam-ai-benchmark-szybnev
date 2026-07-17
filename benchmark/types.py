@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 DEFAULT_RATE_LIMIT_DELAY = 1.5
-DEFAULT_MAX_TOKENS = 768
+DEFAULT_MAX_TOKENS = 3072
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_CONCURRENCY = 1
 
@@ -48,6 +48,7 @@ class QuestionResult:
 
     id: int
     category: str
+    prompt: str
     score: int
     response_snippet: str
     full_response: str
@@ -78,6 +79,7 @@ class QuestionResult:
         result: Dict[str, Any] = {
             "id": self.id,
             "category": self.category,
+            "prompt": self.prompt,
             "score": self.score,
             "response_snippet": self.response_snippet,
             "full_response": self.full_response,

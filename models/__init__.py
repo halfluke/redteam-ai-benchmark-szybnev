@@ -1,9 +1,16 @@
 """LLM API client implementations."""
 
 import importlib.util
+import os
 from typing import Callable, Optional
 
 from .base import APIClient
+from .validation import (
+    ModelListError,
+    ModelNotFoundError,
+    is_model_listed,
+    validate_model_available,
+)
 from .bearer_auth import BearerAuthMixin
 from .cloudrun_auth import create_cloudrun_identity_auth
 from .lmstudio import LMStudioClient
@@ -31,6 +38,10 @@ __all__ = [
     "OPENROUTER_AVAILABLE",
     "create_client",
     "provider_auth_kwargs",
+    "is_model_listed",
+    "validate_model_available",
+    "ModelListError",
+    "ModelNotFoundError",
 ]
 
 
@@ -71,7 +82,7 @@ def create_client(
     Create appropriate API client based on provider.
 
     Args:
-        provider: Provider name ("lmstudio", "ollama", "openwebui", "openrouter")
+        provider: Provider name ("lmstudio", "ollama", "openwebui", "openrouter", "deepinfra")
         endpoint: Custom endpoint URL (optional)
         model: Model name/ID
         api_key: API key (static bearer token for reverse-proxy or OpenRouter)
@@ -92,6 +103,8 @@ def create_client(
             endpoint = "http://localhost:3000"
         elif provider == "openrouter":
             endpoint = "https://openrouter.ai/api/v1"
+        elif provider == "deepinfra":
+            endpoint = "https://api.deepinfra.com/v1/openai"
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -134,6 +147,19 @@ def create_client(
             model,
             api_key=api_key,
             timeout=timeout if timeout is not None else 120,
+        )
+    elif provider == "deepinfra":
+        if not OPENROUTER_AVAILABLE:
+            raise RuntimeError(
+                "DeepInfra requires httpx and tenacity. "
+                "Install with: pip install httpx tenacity"
+            )
+        return OpenRouterClient(
+            endpoint,
+            model,
+            api_key=api_key or os.environ.get("DEEPINFRA_TOKEN"),
+            timeout=timeout if timeout is not None else 120,
+            api_key_env="DEEPINFRA_TOKEN",
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")

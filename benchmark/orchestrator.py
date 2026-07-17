@@ -10,7 +10,6 @@ from .metrics import (
     summarize_results,
     summarize_semantic_results,
     summarize_track,
-    weighted_primary_score,
     weighted_score,
 )
 from .runner import (
@@ -110,9 +109,6 @@ def run_single_model_benchmark(
     total_score = weighted_score(results) if results else 0.0
     interpretation = get_interpretation(total_score)
     summary = summarize_results(results)
-    semantic_summary = summarize_semantic_results(results)
-    if semantic_summary:
-        summary["semantic"] = semantic_summary
 
     has_dual_track = any(r.get("semantic_best") for r in results)
     if has_dual_track:
@@ -120,7 +116,18 @@ def run_single_model_benchmark(
         semantic_track = build_track_results(results, track="semantic")
         summary["rubric_track"] = summarize_track(rubric_track, primary="score")
         if semantic_track:
-            summary["semantic_track"] = summarize_track(semantic_track, primary="semantic_score")
+            summary["semantic_track"] = summarize_track(
+                semantic_track, primary="semantic_score"
+            )
+            # Align summary.semantic with the semantic track (semantic-best),
+            # not the rubric-best answer's sibling semantic score.
+            semantic_summary = summarize_semantic_results(results)
+            if semantic_summary:
+                summary["semantic"] = semantic_summary
+    else:
+        semantic_summary = summarize_semantic_results(results)
+        if semantic_summary:
+            summary["semantic"] = semantic_summary
 
     if tracer:
         tracer.end_benchmark(total_score, interpretation)

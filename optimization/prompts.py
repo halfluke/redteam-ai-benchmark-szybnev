@@ -9,8 +9,19 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from benchmark.keepalive import keepalive_busy
-from models import OllamaClient
+from benchmark.shutdown import GracefulShutdown, check_shutdown
+from models import create_client
+from scoring.garbage import (
+    GARBAGE_SKIP_REASON,
+    format_semantic_attempt_suffix,
+    is_garbage_response,
+    semantic_garbage_skip_payload,
+)
 from scoring.refusal import is_censored_response
+from scoring.semantic_scorer import strip_thinking_blocks
+from utils.timing import format_duration
+
+from .policy import optimization_tracks_resolved
 
 DEFAULT_TEMPERATURE = 0.2
 
@@ -236,13 +247,23 @@ class PromptOptimizer:
 
     def __init__(
         self,
-        optimizer_model: str = "llama3.3:70b",
-        optimizer_endpoint: str = "http://localhost:11434",
+        optimizer_model: str,
+        optimizer_provider: str,
+        optimizer_endpoint: Optional[str] = None,
+        optimizer_api_key: Optional[str] = None,
         max_iterations: int = 4,
-        optimizer_timeout: int = 600,
+        optimization_max_tokens: int = 2048,
+        optimizer_timeout: int = 300,
     ):
-        self.optimizer_client = OllamaClient(optimizer_endpoint, optimizer_model, timeout=optimizer_timeout)
+        self.optimizer_client = create_client(
+            optimizer_provider,
+            optimizer_endpoint or None,
+            optimizer_model,
+            api_key=optimizer_api_key,
+            timeout=optimizer_timeout,
+        )
         self.max_iterations = max_iterations
+        self.optimization_max_tokens = optimization_max_tokens
         self.history = []
         self.strategies = {
             "role_playing": RolePlayingStrategy(),
@@ -270,17 +291,37 @@ class PromptOptimizer:
             Callable[[str, str], Optional[Dict[str, Any]]]
         ] = None,
         trigger_reason: Optional[str] = None,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         temperature: float = DEFAULT_TEMPERATURE,
         keepalive=None,
+        shutdown_requested: Optional[Callable[[], bool]] = None,
     ) -> Dict:
         """Try each strategy and return independent rubric/semantic winners."""
+        shutdown_requested = shutdown_requested or (lambda: False)
+        target_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else getattr(self, "optimization_max_tokens", 2048)
+        )
+        semantic_enabled = score_semantic_func is not None
+        check_shutdown(shutdown_requested)
         self.history = []
         best_rubric: Optional[Dict[str, Any]] = None
         best_semantic: Optional[Dict[str, Any]] = None
 
         def attach_semantic(attempt: Dict[str, Any]) -> Dict[str, Any]:
             if not score_semantic_func or attempt.get("semantic_scores"):
+                return attempt
+            if is_garbage_response(attempt.get("response", "")):
+                response = attempt.get("response", "")
+                attempt["semantic_skipped"] = GARBAGE_SKIP_REASON
+                attempt["semantic_scores"] = {
+                    **semantic_garbage_skip_payload(
+                        answer_source=attempt.get("answer_source", "optimized"),
+                        response=response,
+                    ),
+                    **strip_thinking_blocks(response).diagnostics(),
+                }
                 return attempt
             semantic = score_semantic_func(
                 attempt["response"], attempt.get("answer_source", "optimized")
@@ -305,11 +346,11 @@ class PromptOptimizer:
                 ):
                     best_semantic = dict(attempt)
 
-        def is_both_perfect(attempt: Dict[str, Any]) -> bool:
-            return (
-                score_semantic_func is not None
-                and attempt.get("score") == 100
-                and attempt.get("semantic_score") == 100
+        def tracks_resolved() -> bool:
+            return optimization_tracks_resolved(
+                best_rubric,
+                best_semantic,
+                semantic_enabled=semantic_enabled,
             )
 
         def result_payload(
@@ -351,14 +392,14 @@ class PromptOptimizer:
             with keepalive_busy(keepalive, "target"):
                 response = target_client.query(
                     original_prompt,
-                    max_tokens=max_tokens,
+                    max_tokens=target_max_tokens,
                     temperature=temperature,
                 )
             score = scorer_func(question_id, response)
 
         baseline_score = score
         baseline_response = response
-        if trigger_reason == "low_semantic":
+        if trigger_reason in {"low_semantic", "zero_semantic", "semantic_garbage"}:
             _sem_score = (
                 initial_semantic_scores.get("score")
                 if initial_semantic_scores
@@ -369,18 +410,38 @@ class PromptOptimizer:
                     f"semantic_mismatch (rubric: {baseline_score}%, "
                     f"semantic: {int(_sem_score)}%)"
                 )
+            elif (
+                initial_semantic_scores
+                and initial_semantic_scores.get("skip_reason") == GARBAGE_SKIP_REASON
+            ):
+                baseline_failure_reason = (
+                    f"garbage_response (rubric: {baseline_score}%)"
+                )
             else:
                 baseline_failure_reason = f"semantic_mismatch (rubric: {baseline_score}%)"
-        elif trigger_reason == "low_both":
-            _sem_score = (
-                initial_semantic_scores.get("score")
-                if initial_semantic_scores
-                else None
-            )
-            sem_str = f", semantic: {int(_sem_score)}%" if isinstance(_sem_score, (int, float)) else ""
-            baseline_failure_reason = (
-                f"{'censored' if baseline_score == 0 else 'inaccurate'} (rubric: {baseline_score}%{sem_str})"
-            )
+        elif trigger_reason in {"low_both", "zero_both"}:
+            if (
+                initial_semantic_scores
+                and initial_semantic_scores.get("skip_reason") == GARBAGE_SKIP_REASON
+            ):
+                baseline_failure_reason = (
+                    f"garbage_response (rubric: {baseline_score}%)"
+                )
+            else:
+                _sem_score = (
+                    initial_semantic_scores.get("score")
+                    if initial_semantic_scores
+                    else None
+                )
+                sem_str = (
+                    f", semantic: {int(_sem_score)}%"
+                    if isinstance(_sem_score, (int, float))
+                    else ""
+                )
+                baseline_failure_reason = (
+                    f"{'censored' if baseline_score == 0 else 'inaccurate'} "
+                    f"(rubric: {baseline_score}%{sem_str})"
+                )
         else:
             baseline_failure_reason = (
                 "censored" if baseline_score == 0 else f"inaccurate (score: {baseline_score}%)"
@@ -404,20 +465,19 @@ class PromptOptimizer:
             baseline_attempt["semantic_similarity"] = initial_semantic_scores.get(
                 "similarity"
             )
+            if initial_semantic_scores.get("skip_reason") == GARBAGE_SKIP_REASON:
+                baseline_attempt["semantic_skipped"] = GARBAGE_SKIP_REASON
         elif score_semantic_func:
             attach_semantic(baseline_attempt)
 
         self.history.append(baseline_attempt)
         consider_attempt(baseline_attempt)
 
-        _bl_sem = baseline_attempt.get("semantic_score")
-        _bl_sem_str = f"  |  semantic {int(_bl_sem)}%" if isinstance(_bl_sem, (int, float)) else ""
+        _bl_sem_str = format_semantic_attempt_suffix(attempt=baseline_attempt)
         print(f"    Original: rubric {score}%{_bl_sem_str}")
 
-        if score >= 100 and not score_semantic_func:
-            return result_payload(iterations=0, early_exit="rubric_perfect")
-        if is_both_perfect(baseline_attempt):
-            return result_payload(iterations=0, early_exit="both_perfect")
+        if tracks_resolved():
+            return result_payload(iterations=0, early_exit="tracks_resolved")
 
         if self.max_iterations <= 0:
             return result_payload(iterations=0)
@@ -425,7 +485,9 @@ class PromptOptimizer:
         pending_generation: Optional[Future] = None
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prompt-opt")
 
-        def generate_for_strategy(strategy_name: str) -> str:
+        def generate_for_strategy(strategy_name: str) -> tuple[str, float]:
+            check_shutdown(shutdown_requested)
+            started = time.time()
             with keepalive_busy(keepalive, "optimizer"):
                 selected = self._generate_optimized_prompt(
                     strategy_name=strategy_name,
@@ -441,10 +503,11 @@ class PromptOptimizer:
                 selected = self.strategies[strategy_name].apply(
                     original_prompt, {"category": category}
                 )
-            return selected
+            return selected, (time.time() - started) * 1000
 
         try:
             for iteration in range(1, self.max_iterations + 1):
+                check_shutdown(shutdown_requested)
                 strategy_name = STRATEGY_ORDER[(iteration - 1) % len(STRATEGY_ORDER)]
                 print(
                     f"    [Optimization iter {iteration}/{self.max_iterations}] "
@@ -452,9 +515,10 @@ class PromptOptimizer:
                 )
 
                 if pending_generation is not None:
-                    selected_prompt = pending_generation.result()
+                    selected_prompt, optimizer_ms = pending_generation.result()
+                    check_shutdown(shutdown_requested)
                 else:
-                    selected_prompt = generate_for_strategy(strategy_name)
+                    selected_prompt, optimizer_ms = generate_for_strategy(strategy_name)
 
                 if iteration < self.max_iterations:
                     next_strategy = STRATEGY_ORDER[iteration % len(STRATEGY_ORDER)]
@@ -464,6 +528,7 @@ class PromptOptimizer:
                 else:
                     pending_generation = None
 
+                print(f"      Optimizer reframe ({format_duration(optimizer_ms)})")
                 prompt_snippet = (
                     (selected_prompt[:100] + "...")
                     if len(selected_prompt) > 100
@@ -471,19 +536,24 @@ class PromptOptimizer:
                 )
                 print(f"      Reframed: {prompt_snippet.replace(chr(10), ' ')}")
 
+                check_shutdown(shutdown_requested)
                 started = time.time()
                 with keepalive_busy(keepalive, "target"):
                     response = target_client.query(
                         selected_prompt,
-                        max_tokens=max_tokens,
+                        max_tokens=target_max_tokens,
                         temperature=temperature,
                     )
                 latency_ms = (time.time() - started) * 1000
+                check_shutdown(shutdown_requested)
 
                 score = scorer_func(question_id, response)
 
                 resp_snippet = (response[:120] + "...") if len(response) > 120 else response
-                print(f"      Response: {resp_snippet.replace(chr(10), ' ')}")
+                print(
+                    f"      Target model ({format_duration(latency_ms)}): "
+                    f"{resp_snippet.replace(chr(10), ' ')}"
+                )
 
                 attempt = {
                     "iteration": iteration,
@@ -493,6 +563,7 @@ class PromptOptimizer:
                     "score": score,
                     "censored": is_censored_response(response),
                     "latency_ms": latency_ms,
+                    "optimizer_ms": optimizer_ms,
                     "answer_source": "optimized",
                 }
                 self.history.append(attempt)
@@ -501,19 +572,24 @@ class PromptOptimizer:
                 if score_semantic_func:
                     attach_semantic(attempt)
                     consider_attempt(attempt)
-                    sem_score = attempt.get("semantic_score")
-                    sem_str = f"  |  semantic {int(sem_score)}%" if isinstance(sem_score, (int, float)) else ""
+                    sem_str = format_semantic_attempt_suffix(
+                        attempt=attempt,
+                        prefix="  |  ",
+                    )
                     print(f"      Rubric: {score}%{sem_str}")
-                    if is_both_perfect(attempt):
+                    if tracks_resolved():
                         break
                 else:
                     print(f"      Score: {score}%")
-                    if score >= 100:
+                    if tracks_resolved():
                         break
 
+                check_shutdown(shutdown_requested)
                 time.sleep(0.5)
         finally:
-            executor.shutdown(wait=True)
+            if pending_generation is not None:
+                pending_generation.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
 
         best_rubric_score = (best_rubric or {}).get("score", baseline_score)
         best_semantic_score = (best_semantic or {}).get("semantic_score")
@@ -526,11 +602,7 @@ class PromptOptimizer:
             print(f"      ✓ Best score after all strategies: {best_rubric_score}%")
         else:
             print(f"      All strategies tried. Best score: {best_rubric_score}%")
-        early_exit = (
-            "both_perfect"
-            if score_semantic_func and best_rubric_score == 100 and (best_semantic or {}).get("semantic_score") == 100
-            else None
-        )
+        early_exit = "tracks_resolved" if tracks_resolved() else None
         return result_payload(iterations=iteration, early_exit=early_exit)
 
     def _generate_optimized_prompt(

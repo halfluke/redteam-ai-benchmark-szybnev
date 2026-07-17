@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional
 
 import requests
 
-from .base import APIClient, RequestsRetryMixin
+from .base import APIClient, RequestsRetryMixin, normalize_message_content
 from .bearer_auth import BearerAuthMixin
 
 
@@ -31,6 +31,7 @@ class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
         self.invalidate_auth_token = invalidate_auth_token
         self.keep_alive = keep_alive or os.environ.get("OLLAMA_KEEP_ALIVE")
         self.session = requests.Session()
+        self.last_probe_error = None
 
     def _get_headers(self) -> Dict[str, str]:
         """Return Ollama headers, including optional Cloud Run / reverse-proxy auth."""
@@ -62,7 +63,9 @@ class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
         )
         try:
             message = data["message"]
-            return message.get("content") or message.get("thinking", "")
+            return normalize_message_content(
+                message.get("content") or message.get("thinking", "")
+            )
         except KeyError as e:
             raise RuntimeError(f"Invalid API response format: {e}") from e
 
@@ -85,12 +88,11 @@ class OllamaClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
 
     def test_connection(self) -> bool:
         """Test Ollama connection."""
-        try:
-            url = f"{self.base_url}/api/tags"
-            response = self.session.get(url, headers=self._get_headers(), timeout=self._probe_timeout())
-            return response.status_code == 200
-        except Exception:
-            return False
+        url = f"{self.base_url}/api/tags"
+        headers = self._get_headers()
+        return self._probe_get_with_retries(
+            url, headers, timeout=self._probe_timeout()
+        )
 
     def close(self) -> None:
         """Close the persistent HTTP session."""

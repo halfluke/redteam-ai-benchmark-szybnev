@@ -15,7 +15,7 @@ provider:
   name: ollama
   endpoint: https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app
   auth: cloudrun_identity
-  timeout: 600
+  timeout: 300
   # Sent on every request (main query + keepalive ping): tells the Ollama
   # server on Cloud Run to never evict the model from VRAM while the
   # container is alive, independent of how often keepalive pings land.
@@ -23,6 +23,10 @@ provider:
 
 scoring:
   method: rubric
+  # Optional parallel semantic audit (--semantic --semantic-provider deepinfra)
+  # semantic:
+  #   provider: deepinfra
+  #   model: Qwen/Qwen3-Embedding-8B
 
 keepalive:
   enabled: true
@@ -39,7 +43,7 @@ keepalive:
 gpu_check:
   enabled: true
   min_vram_fraction: 0.9
-  timeout_s: 120
+  timeout_s: 210
 
 # Estimate only (see utils/cloudrun_cost.py) -- matches deploy-bugtrace.sh's
 # defaults (8 CPU, 32Gi memory, 1x L4, --no-gpu-zonal-redundancy). Update if
@@ -58,6 +62,6 @@ export:
   include_response: true
 
 rate_limit_delay: 2.0
-max_tokens: 4096
+max_tokens: 3072
 temperature: 0.2
 concurrency: 1

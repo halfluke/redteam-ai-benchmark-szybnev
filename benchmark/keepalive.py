@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from models.lmstudio import LMStudioClient
 from models.ollama import OllamaClient
+from models.openrouter import OpenRouterClient
+
+_CLOUD_OPTIMIZER_HOSTS = frozenset({"api.deepinfra.com", "openrouter.ai"})
+
+
+def _is_cloud_optimizer_client(client) -> bool:
+    """True for billable hosted APIs that do not need idle warmup pings."""
+    if not isinstance(client, OpenRouterClient):
+        return False
+    host = urlparse(getattr(client, "base_url", "") or "").hostname or ""
+    return host in _CLOUD_OPTIMIZER_HOSTS
+
+
+def _skip_ping_for_role(role: str, client) -> bool:
+    return role == "optimizer" and _is_cloud_optimizer_client(client)
 
 
 def ping_model_client(
@@ -51,10 +67,13 @@ def _ping_ollama(
     ollama_keep_alive = keep_alive if keep_alive is not None else getattr(client, "keep_alive", None)
     if ollama_keep_alive is not None:
         payload["keep_alive"] = ollama_keep_alive
+    lock = getattr(client, "_request_lock", None)
+    lock_ctx = lock if lock is not None else nullcontext()
     try:
-        response = client.session.post(
-            url, json=payload, headers=headers, timeout=timeout_s
-        )
+        with lock_ctx:
+            response = client.session.post(
+                url, json=payload, headers=headers, timeout=timeout_s
+            )
         response.raise_for_status()
         return True
     except Exception:
@@ -76,10 +95,13 @@ def _ping_lmstudio(
         "max_tokens": max_tokens,
         "stream": False,
     }
+    lock = getattr(client, "_request_lock", None)
+    lock_ctx = lock if lock is not None else nullcontext()
     try:
-        response = client.session.post(
-            url, json=payload, headers=headers, timeout=timeout_s
-        )
+        with lock_ctx:
+            response = client.session.post(
+                url, json=payload, headers=headers, timeout=timeout_s
+            )
         response.raise_for_status()
         return True
     except Exception:
@@ -114,6 +136,11 @@ class ModelKeepalive:
         on_ping: Optional[Callable[[str, bool], None]] = None,
     ):
         self._endpoints: List[Tuple[str, object]] = list(endpoints)
+        self._skip_ping_roles = {
+            role
+            for role, client in self._endpoints
+            if _skip_ping_for_role(role, client)
+        }
         self.interval_s = interval_s
         self.prompt = prompt
         self.max_tokens = max_tokens
@@ -139,6 +166,9 @@ class ModelKeepalive:
         return {name for name, _ in self._endpoints if name not in busy}
 
     def ping_role(self, role: str, *, report: bool = True) -> bool:
+        if role in self._skip_ping_roles:
+            return True
+
         with self._lock:
             if role in self._busy:
                 return True
@@ -183,6 +213,9 @@ class ModelKeepalive:
         """Warm up all models and start the background keepalive loop."""
         warmup = self.warmup()
         for role, ok in warmup.items():
+            if role in self._skip_ping_roles:
+                print(f"   Keepalive warmup ({role}): skipped (cloud API)")
+                continue
             status = "ok" if ok else "failed"
             print(f"   Keepalive warmup ({role}): {status}")
         self._stop.clear()
@@ -197,7 +230,14 @@ class ModelKeepalive:
         """Stop the background keepalive loop."""
         self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=self.timeout_s + 5)
+            # Idle pings are sequential; budget must cover every pingable role.
+            pingable = sum(
+                1
+                for role, _ in self._endpoints
+                if role not in self._skip_ping_roles
+            )
+            join_timeout = self.timeout_s * max(1, pingable) + 5
+            self._thread.join(timeout=join_timeout)
         self._thread = None
 
     def __enter__(self) -> "ModelKeepalive":

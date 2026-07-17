@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 import run_benchmark
 from benchmark.gpu_check import (
@@ -92,7 +93,7 @@ def test_get_vram_residency_request_failure_returns_none():
 
 def test_run_gpu_check_disabled_when_threshold_zero():
     client = _client(ps_payload=_ps_payload("test-model", 100, 0))
-    assert run_gpu_check(client, min_vram_fraction=0, timeout_s=10) is None
+    assert run_gpu_check(client, min_vram_fraction=0, timeout_s=10) == 0.0
 
 
 def test_run_gpu_check_passes_when_fully_resident():
@@ -117,14 +118,44 @@ def test_run_gpu_check_raises_on_partial_offload_below_threshold():
         run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10)
 
 
-def test_run_gpu_check_skips_when_unmeasurable():
+def test_run_gpu_check_raises_when_unmeasurable():
     client = _client(ps_payload={"models": []})
-    assert run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10) is None
+    with pytest.raises(GpuCheckFailed, match="/api/ps did not report VRAM residency"):
+        run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10)
 
 
-def test_run_gpu_check_skips_when_load_request_fails():
+def test_run_gpu_check_raises_when_load_request_fails():
     client = _client(raise_on_post=True, ps_payload=_ps_payload("test-model", 100, 100))
-    assert run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10) is None
+    with pytest.raises(GpuCheckFailed, match="could not load the model"):
+        run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10)
+
+
+def test_run_gpu_check_retries_load_after_timeout():
+    class TimeoutThenOkSession:
+        def __init__(self):
+            self.post_calls = 0
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.post_calls += 1
+            if self.post_calls == 1:
+                raise requests.exceptions.Timeout()
+            return FakeResponse({"message": {"content": "hi"}})
+
+        def get(self, url, headers=None, timeout=None):
+            return FakeResponse(_ps_payload("test-model", 100, 100))
+
+    client = _client()
+    client.session = TimeoutThenOkSession()
+
+    fraction = run_gpu_check(client, min_vram_fraction=0.9, timeout_s=10)
+
+    assert fraction == pytest.approx(1.0)
+    assert client.session.post_calls == 2
+
+
+def test_run_gpu_check_raises_for_non_ollama_client():
+    with pytest.raises(GpuCheckFailed, match="provider is not Ollama"):
+        run_gpu_check(object(), min_vram_fraction=0.9, timeout_s=10)
 
 
 def test_resolve_gpu_check_config_cli_overrides_disabled_config():
@@ -215,9 +246,21 @@ class _FakeOptimizerClient:
     base_url = "http://optimizer.local"
     model_name = "optimizer-model"
 
+    def list_models(self):
+        return [{"name": "optimizer-model", "size": 1}]
+
 
 class _FakeOptimizer:
-    def __init__(self, optimizer_model, optimizer_endpoint, max_iterations):
+    def __init__(
+        self,
+        optimizer_model,
+        optimizer_provider,
+        optimizer_endpoint=None,
+        optimizer_api_key=None,
+        max_iterations=1,
+        optimization_max_tokens=2048,
+        optimizer_timeout=300,
+    ):
         self.optimizer_client = _FakeOptimizerClient()
 
     def close(self):
@@ -247,7 +290,7 @@ def test_gpu_check_only_applies_to_target_not_optimizer_in_run_command(monkeypat
 
     def fake_run_gpu_check(client, **kwargs):
         gpu_check_calls.append(client)
-        return None
+        return 1.0
 
     args = SimpleNamespace(
         provider="ollama",
@@ -259,8 +302,10 @@ def test_gpu_check_only_applies_to_target_not_optimizer_in_run_command(monkeypat
         max_tokens=32,
         temperature=0.2,
         concurrency=1,
-        optimize_prompts=True,
+        no_optimize=False,
+        optimizer_provider="ollama",
         optimizer_model="optimizer-model",
+        optimizer_api_key=None,
         optimizer_endpoint="http://optimizer.local",
         max_optimization_iterations=1,
         export_csv=False,
@@ -287,7 +332,7 @@ def test_gpu_check_only_applies_to_target_not_optimizer_in_interactive(monkeypat
 
     def fake_run_gpu_check(client, **kwargs):
         gpu_check_calls.append(client)
-        return None
+        return 1.0
 
     args = SimpleNamespace(
         provider="ollama",
@@ -298,8 +343,10 @@ def test_gpu_check_only_applies_to_target_not_optimizer_in_interactive(monkeypat
         max_tokens=32,
         temperature=0.2,
         concurrency=1,
-        optimize_prompts=True,
+        no_optimize=False,
+        optimizer_provider="ollama",
         optimizer_model="optimizer-model",
+        optimizer_api_key=None,
         optimizer_endpoint="http://optimizer.local",
         max_optimization_iterations=1,
         export_csv=False,

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pick import pick
 
@@ -47,20 +47,36 @@ from benchmark.types import (
 )
 from benchmark.gpu_check import GpuCheckFailed, run_gpu_check
 from benchmark.keepalive import ModelKeepalive
-from models import create_client, provider_auth_kwargs
+from models import (
+    ModelListError,
+    ModelNotFoundError,
+    create_client,
+    provider_auth_kwargs,
+    validate_model_available,
+)
 from optimization import PromptOptimizer, save_optimization_results
 from scoring import create_scorer, create_semantic_scorer
 from scoring.preload import preload_semantic_scorer
+from scoring.semantic_calibration import default_semantic_thresholds
+from scoring.semantic_embedder import DEFAULT_DEEPINFRA_SEMANTIC_MODEL
 from scoring.semantic_scorer import (
     DEFAULT_SEMANTIC_ANSWERS_FILE,
-    DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
     DEFAULT_SEMANTIC_MODEL,
+    DEFAULT_SEMANTIC_PROVIDER,
+    default_semantic_max_seq_length,
 )
 from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
 from utils.cloudrun_cost import estimate_cost, format_cost_estimate
-from utils.config import DEFAULT_QUESTIONS_FILE, DEFAULT_SCORER, GpuCheckConfig, KeepaliveConfig
+from utils.config import (
+    DEFAULT_QUESTIONS_FILE,
+    DEFAULT_SCORER,
+    GpuCheckConfig,
+    KeepaliveConfig,
+    OptimizationConfig,
+    default_optimization_max_tokens,
+)
 from utils.export import BenchmarkExporter, get_interpretation
 
 Langfuse = langfuse_module.Langfuse
@@ -115,7 +131,11 @@ __all__ = [
 
 
 def _load_optional_config(args):
-    """Load YAML config once at command start."""
+    """Load YAML config once at command start.
+
+    A missing or invalid ``--config`` aborts the run so Cloud Run auth,
+    GPU checks, and other YAML settings cannot silently fall back to defaults.
+    """
     if not getattr(args, "config", None):
         return None
 
@@ -124,8 +144,8 @@ def _load_optional_config(args):
         print(f"📄 Loaded configuration from {args.config}")
         return config
     except Exception as e:
-        print(f"⚠️  Warning: Failed to load config: {e}")
-        return None
+        print(f"❌ Error: Failed to load config: {e}")
+        sys.exit(1)
 
 
 def _apply_config_defaults(args, config) -> None:
@@ -142,18 +162,12 @@ def _apply_config_defaults(args, config) -> None:
         elif config.provider.api_key_env:
             args.api_key = os.environ.get(config.provider.api_key_env)
 
-    if (
-        hasattr(args, "optimize_prompts")
-        and config.optimization.enabled
-        and not args.optimize_prompts
-    ):
-        args.optimize_prompts = True
-    if (
-        hasattr(args, "optimizer_model")
-        and config.optimization.optimizer_model
-        and args.optimizer_model == "llama3.3:70b"
-    ):
+    if hasattr(args, "optimizer_provider") and config.optimization.optimizer_provider and not args.optimizer_provider:
+        args.optimizer_provider = config.optimization.optimizer_provider
+    if hasattr(args, "optimizer_model") and config.optimization.optimizer_model and not args.optimizer_model:
         args.optimizer_model = config.optimization.optimizer_model
+    if hasattr(args, "optimizer_api_key") and config.optimization.optimizer_api_key and not args.optimizer_api_key:
+        args.optimizer_api_key = config.optimization.optimizer_api_key
     if (
         hasattr(args, "optimizer_endpoint")
         and config.optimization.optimizer_endpoint
@@ -162,8 +176,8 @@ def _apply_config_defaults(args, config) -> None:
         args.optimizer_endpoint = config.optimization.optimizer_endpoint
     if (
         hasattr(args, "max_optimization_iterations")
-        and config.optimization.max_iterations is not None
-        and config.optimization.max_iterations != 3
+        and args.max_optimization_iterations is None
+        and config
     ):
         args.max_optimization_iterations = config.optimization.max_iterations
     if hasattr(args, "semantic"):
@@ -171,10 +185,17 @@ def _apply_config_defaults(args, config) -> None:
         if semantic_config:
             if semantic_config.enabled and not args.semantic:
                 args.semantic = True
+            if not getattr(args, "semantic_provider", None):
+                args.semantic_provider = semantic_config.provider
             if not getattr(args, "semantic_model", None):
                 args.semantic_model = semantic_config.model
             if not getattr(args, "semantic_answers", None):
                 args.semantic_answers = semantic_config.answers_file
+            if (
+                not getattr(args, "semantic_api_key", None)
+                and semantic_config.api_key
+            ):
+                args.semantic_api_key = semantic_config.api_key
 
 
 def _questions_file_for_args(args, config) -> str:
@@ -263,28 +284,56 @@ def _create_semantic_scorer_bundle(args, config, questions: List[Dict]):
         or getattr(semantic_config, "answers_file", None)
         or DEFAULT_SEMANTIC_ANSWERS_FILE
     )
+    provider = (
+        getattr(args, "semantic_provider", None)
+        or getattr(semantic_config, "provider", None)
+        or DEFAULT_SEMANTIC_PROVIDER
+    ).lower()
     model_name = (
         getattr(args, "semantic_model", None)
         or getattr(semantic_config, "model", None)
         or DEFAULT_SEMANTIC_MODEL
     )
-    thresholds = getattr(semantic_config, "thresholds", None)
+    if provider == "deepinfra" and model_name == DEFAULT_SEMANTIC_MODEL:
+        model_name = DEFAULT_DEEPINFRA_SEMANTIC_MODEL
+    if semantic_config and semantic_config.thresholds_explicit:
+        thresholds = semantic_config.thresholds
+    else:
+        thresholds = default_semantic_thresholds(
+            provider=provider,
+            model_name=model_name,
+        )
     device = getattr(semantic_config, "device", "auto")
-    max_seq_length = getattr(semantic_config, "max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)
+    if semantic_config and semantic_config.max_seq_length_explicit:
+        max_seq_length = semantic_config.max_seq_length
+    else:
+        max_seq_length = default_semantic_max_seq_length(provider=provider)
+    endpoint = getattr(semantic_config, "endpoint", None) if semantic_config else None
+    api_key = (
+        getattr(args, "semantic_api_key", None)
+        or (getattr(semantic_config, "api_key", None) if semantic_config else None)
+    )
+    api_key_env = getattr(semantic_config, "api_key_env", "DEEPINFRA_TOKEN") if semantic_config else "DEEPINFRA_TOKEN"
+    if provider == "deepinfra" and not api_key:
+        api_key = os.environ.get(api_key_env)
 
     try:
         bundle = create_semantic_scorer(
             questions=questions,
             answers_file=answers_file,
             model_name=model_name,
+            provider=provider,
             thresholds=thresholds,
             device=device,
             max_seq_length=max_seq_length,
+            endpoint=endpoint,
+            api_key=api_key,
+            api_key_env=api_key_env,
         )
         bundle.scorer.warm_encoder()
         print(
             f"✓ Using parallel semantic scoring "
-            f"(model: {model_name}, answers: {answers_file})\n"
+            f"(provider: {provider}, model: {model_name}, answers: {answers_file})\n"
         )
         return bundle
     except (RuntimeError, ValueError) as e:
@@ -294,20 +343,19 @@ def _create_semantic_scorer_bundle(args, config, questions: List[Dict]):
 
 def parse_reference_answers(filepath: str = "answers_all.txt") -> Dict[int, str]:
     """Load legacy reference answers for prompt optimization context."""
+    from scoring.semantic_scorer import parse_answers_sections
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
     except FileNotFoundError:
         return {}
 
-    return {
-        int(q_id): answer.strip()
-        for q_id, answer in re.findall(
-            r"=== Q(\d+):.*?===\s+(.*?)(?=\n=== Q\d+:|$)",
-            content,
-            re.DOTALL,
-        )
-    }
+    return parse_answers_sections(
+        content,
+        source=filepath,
+        require_nonempty=False,
+    )
 
 
 def _load_dataset_for_cli(filepath: str) -> BenchmarkDataset:
@@ -404,6 +452,13 @@ def _create_configured_client(provider, endpoint, model_name, api_key, config, a
             ),
         )
         if auth_kwargs:
+            if provider == "openwebui":
+                raise SystemExit(
+                    "ERROR: provider 'openwebui' does not support "
+                    f"auth={config.provider.auth!r} (e.g. cloudrun_identity). "
+                    "Use ollama or lmstudio for Cloud Run identity tokens, "
+                    "or remove provider.auth from the config."
+                )
             api_key = None
             extra_kwargs.update(auth_kwargs)
 
@@ -456,10 +511,7 @@ def _run_gpu_check_or_exit(client, model_name: str, args, config) -> None:
         min_vram_fraction=gpu_check_cfg.min_vram_fraction,
         timeout_s=gpu_check_cfg.timeout_s,
     )
-    if fraction is None:
-        print("skipped (not measurable for this provider)")
-    else:
-        print(f"ok ({fraction:.0%} in VRAM)")
+    print(f"ok ({fraction:.0%} in VRAM)")
 
 
 def _should_run_keepalive(config, optimizer) -> bool:
@@ -550,8 +602,10 @@ def _export_run_config(
         "concurrency": runtime.concurrency if runtime else None,
         "request_log": runtime.request_log if runtime else None,
         "question_ids": getattr(args, "question_ids", None),
-        "optimize_prompts": getattr(args, "optimize_prompts", None),
+        "no_optimize": getattr(args, "no_optimize", None),
+        "optimizer_provider": getattr(args, "optimizer_provider", None),
         "optimizer_model": getattr(args, "optimizer_model", None),
+        "optimizer_api_key": "set" if getattr(args, "optimizer_api_key", None) else None,
         "optimizer_endpoint": getattr(args, "optimizer_endpoint", None),
         "max_optimization_iterations": getattr(args, "max_optimization_iterations", None),
         "semantic": getattr(args, "semantic", None),
@@ -670,24 +724,121 @@ def _export_benchmark_results(
     return {fmt: str(path) for fmt, path in exported.items()}
 
 
-def _initialize_optimizer(args, endpoint: str):
-    """Create prompt optimizer if requested."""
-    if not args.optimize_prompts:
+def _abort_model_validation_error(exc: Exception) -> None:
+    raise SystemExit(f"ERROR: {exc}") from exc
+
+
+def _validate_model_available(client, model_name: str, *, provider: str, role: str) -> None:
+    """Abort before benchmark questions if the model is not listed by the provider."""
+    try:
+        validate_model_available(
+            client,
+            model_name,
+            provider=provider,
+            role=role,
+        )
+    except (ModelListError, ModelNotFoundError) as e:
+        _abort_model_validation_error(e)
+
+
+_CLOUD_OPTIMIZER_PROVIDERS = {"deepinfra", "openrouter"}
+_CLOUD_OPTIMIZER_ENV_KEYS = {
+    "deepinfra": "DEEPINFRA_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _resolve_optimizer_endpoint(
+    provider: str,
+    args,
+    target_endpoint: str,
+    config,
+) -> str | None:
+    """Resolve optimizer endpoint.
+
+    Explicit CLI/config wins. Cloud providers and local providers both default
+    to ``None`` (provider localhost / public API defaults) so a Cloud Run
+    target URL is never inherited by a local optimizer by accident.
+    """
+    del target_endpoint  # intentionally unused: never inherit the target URL
+    explicit = getattr(args, "optimizer_endpoint", None)
+    if not explicit and config:
+        explicit = config.optimization.optimizer_endpoint
+    if explicit:
+        return explicit
+    return None
+
+
+def _initialize_optimizer(args, config, endpoint: str):
+    """Create prompt optimizer if configured and not disabled."""
+    if getattr(args, "no_optimize", False):
         return None
 
-    optimizer_endpoint = args.optimizer_endpoint or endpoint
+    provider = getattr(args, "optimizer_provider", None)
+    model = getattr(args, "optimizer_model", None)
+    api_key = getattr(args, "optimizer_api_key", None)
+
+    if config:
+        if not provider:
+            provider = config.optimization.optimizer_provider
+        if not model:
+            model = config.optimization.optimizer_model
+        if not api_key:
+            api_key = config.optimization.optimizer_api_key
+
+    if bool(provider) != bool(model):
+        raise SystemExit(
+            "ERROR: --optimizer-provider and --optimizer-model must be used together "
+            f"(got provider={provider!r}, model={model!r}). "
+            "Specify both, or neither (no optimization)."
+        )
+
+    if not provider and not model:
+        return None
+
+    if provider in _CLOUD_OPTIMIZER_PROVIDERS:
+        env_var = _CLOUD_OPTIMIZER_ENV_KEYS[provider]
+        effective_key = api_key or os.environ.get(env_var)
+        if not effective_key:
+            raise SystemExit(
+                f"ERROR: optimizer provider '{provider}' requires an API key. "
+                f"Pass --optimizer-api-key or set {env_var}."
+            )
+        api_key = effective_key
+
+    optimizer_endpoint = _resolve_optimizer_endpoint(provider, args, endpoint, config)
+    opt_cfg = config.optimization if config else OptimizationConfig()
+    max_iterations = (
+        args.max_optimization_iterations
+        if getattr(args, "max_optimization_iterations", None) is not None
+        else opt_cfg.max_iterations
+    )
+    if config and opt_cfg.optimization_max_tokens_explicit:
+        optimization_max_tokens = opt_cfg.optimization_max_tokens
+    else:
+        optimization_max_tokens = default_optimization_max_tokens(
+            optimizer_provider=provider,
+        )
     try:
         optimizer = PromptOptimizer(
-            optimizer_model=args.optimizer_model,
+            optimizer_model=model,
+            optimizer_provider=provider,
             optimizer_endpoint=optimizer_endpoint,
-            max_iterations=args.max_optimization_iterations,
+            optimizer_api_key=api_key,
+            max_iterations=max_iterations,
+            optimization_max_tokens=optimization_max_tokens,
         )
-        print(f"✓ Prompt optimization enabled (optimizer: {args.optimizer_model})\n")
+        _validate_model_available(
+            optimizer.optimizer_client,
+            model,
+            provider=provider,
+            role="optimizer",
+        )
+        print(f"✓ Prompt optimization enabled (optimizer: {provider}/{model})\n")
         return optimizer
     except Exception as e:
         print(f"❌ Error initializing optimizer: {e}")
-        print("   Continuing without optimization\n")
-        return None
+        raise SystemExit(1) from e
 
 
 def _langfuse_config_or_none(config):
@@ -728,137 +879,177 @@ def _interpretation_label(score: float) -> str:
     return "not suitable for offensive security tasks"
 
 
-def _track_source_label(r: Dict) -> str:
-    """Return a compact source label: baseline, optimized, or optimized/strategy."""
+def _report_connection_failure(client, provider: str, *, is_remote: bool) -> None:
+    """Print a connectivity failure with probe diagnostics when available."""
+    print(f"❌ Cannot connect to {provider} at {client.base_url}")
+    detail = getattr(client, "last_probe_error", None)
+    if detail:
+        print(f"   Reason: {detail}")
+    if is_remote:
+        print(
+            "   Check: gcloud auth login, roles/run.invoker on the service, "
+            "and that the URL is correct."
+        )
+    else:
+        print(f"   Is {provider} running?")
+
+
+def _winner_source_label(r: Dict) -> str:
+    """Return a human-readable winner source for detail tables."""
     src = r.get("answer_source") or "baseline"
     if src == "optimized":
-        strat = r.get("optimization_strategy", "")
-        return f"opt/{strat}" if strat and strat != "original" else "opt"
-    return src
+        strat = r.get("optimization_strategy") or r.get("strategy") or ""
+        if strat and strat != "original":
+            return f"optimization/{strat}"
+        return "optimization"
+    return "baseline"
 
 
-def _print_track_table(
-    track_results: List[Dict],
+def _winner_score_label(row: Dict, *, score_field: str) -> str:
+    if score_field == "semantic_score":
+        semantic_scores = row.get("semantic_scores") or {}
+        if semantic_scores.get("skipped"):
+            return "skipped"
+    value = row.get(score_field)
+    if isinstance(value, (int, float)):
+        return f"{int(value)}%"
+    return "—"
+
+
+def _winner_question_label(row: Dict) -> str:
+    """Return the prompt shown to the model for this track winner."""
+    prompt = (row.get("prompt") or "").replace("\n", " ").strip()
+    src = row.get("answer_source") or "baseline"
+    if src == "optimized" and prompt:
+        return f"(optimized) {prompt}"
+    return prompt
+
+
+def _print_winner_detail_table(
+    rows: List[Dict],
     *,
-    primary: str,
-    secondary: str,
-    primary_label: str,
-    secondary_label: str,
-    source_label: str = "Source",
+    title: str,
+    score_field: str,
+    score_header: str,
+    total_score: Optional[float] = None,
 ) -> None:
-    """Print a per-question table for one scoring track."""
+    """Print per-question winners with category, divergence, and prompt text."""
+    if not rows:
+        return
+
+    print()
+    print("=" * 100)
+    print(title)
+    print("=" * 100)
     print(
-        f"{'Q#':<3} {'D':<2} {'Category':<22} {primary_label:<10} {secondary_label:<10} "
-        f"{source_label:<22} {'Response Snippet'}"
+        f"{'Q#':<4} {'D':<2} {'Category':<22} {score_header:<10} "
+        f"{'Source':<24} Question"
     )
-    print("-" * 92)
-    for r in track_results:
-        pval = r.get(primary)
-        sval = r.get(secondary)
-        plabel = f"{int(pval)}%" if isinstance(pval, (int, float)) else "—"
-        slabel = f"{int(sval)}%" if isinstance(sval, (int, float)) else "—"
-        snippet = r.get("response_snippet", "")
-        q_id = r.get("id", "?")
-        category = r.get("category", "?")
-        source = _track_source_label(r)
-        diverged = diverged_marker(r)
+    print("-" * 100)
+    for row in sorted(rows, key=lambda item: item.get("id", 0)):
+        q_id = row.get("id", "?")
+        diverged = diverged_marker(row)
+        category = row.get("category", "?")
+        score_label = _winner_score_label(row, score_field=score_field)
+        source = _winner_source_label(row)
+        question = _winner_question_label(row)
         print(
-            f"{q_id!s:<3} {diverged:<2} {category:<22} {plabel:<10} {slabel:<10} "
-            f"{source:<22} {snippet}"
+            f"{q_id!s:<4} {diverged:<2} {category:<22} {score_label:<10} "
+            f"{source:<24} {question}"
+        )
+    if total_score is not None:
+        print("-" * 100)
+        print(
+            f"   Total: {total_score:.1f}%  →  {_interpretation_label(total_score)}"
+        )
+
+
+def _semantic_scoring_used(results: List[Dict]) -> bool:
+    for result in results:
+        if result.get("semantic_best"):
+            return True
+        if isinstance(result.get("semantic_score"), (int, float)):
+            return True
+        semantic_scores = result.get("semantic_scores") or {}
+        if semantic_scores and not semantic_scores.get("skipped"):
+            return True
+    return False
+
+
+def _print_winner_detail_tables(
+    results: List[Dict],
+    *,
+    rubric_total: Optional[float] = None,
+    semantic_total: Optional[float] = None,
+) -> None:
+    """Print rubric-best and semantic-best winner tables with full question text."""
+    has_dual_track = any(result.get("semantic_best") for result in results)
+    semantic_used = _semantic_scoring_used(results)
+
+    if has_dual_track:
+        rubric_rows = build_track_results(results, track="rubric")
+        semantic_rows = build_track_results(results, track="semantic")
+    else:
+        rubric_rows = list(results)
+        semantic_rows = (
+            build_track_results(results, track="semantic") if semantic_used else []
+        )
+
+    _print_winner_detail_table(
+        rubric_rows,
+        title="RUBRIC WINNERS — best rubric-scoring answer per question",
+        score_field="score",
+        score_header="Rubric",
+        total_score=rubric_total,
+    )
+    if semantic_used:
+        _print_winner_detail_table(
+            semantic_rows,
+            title="SEMANTIC WINNERS — best semantic-scoring answer per question",
+            score_field="semantic_score",
+            score_header="Semantic",
+            total_score=semantic_total,
         )
 
 
 def _print_final_report(results: List[Dict], total_score: float) -> None:
+    """Print final totals and per-track winner detail tables."""
     has_dual_track = any(result.get("semantic_best") for result in results)
+    semantic_total = weighted_semantic_score(results)
 
     if has_dual_track:
         rubric_track = build_track_results(results, track="rubric")
         semantic_track = build_track_results(results, track="semantic")
-        rubric_total = weighted_primary_score(rubric_track, "score") if rubric_track else total_score
-        semantic_total_dual = weighted_primary_score(semantic_track, "semantic_score") if semantic_track else None
-
-        print("\n" + "=" * 72)
-        print(f"📊 RUBRIC TRACK — best rubric-scoring answer per question")
-        print(f"   Total: {rubric_total:.1f}%  →  {_interpretation_label(rubric_total)}")
-        print("=" * 72)
-        _print_track_table(
-            rubric_track,
-            primary="score",
-            secondary="semantic_score",
-            primary_label="Rubric",
-            secondary_label="Semantic",
-            source_label="Rubric src",
+        rubric_total = (
+            weighted_primary_score(rubric_track, "score") if rubric_track else total_score
         )
-
-        print()
-        print("=" * 72)
-        print(f"📊 SEMANTIC TRACK — best semantic-scoring answer per question")
-        if semantic_total_dual is not None:
-            print(
-                f"   Total: {semantic_total_dual:.1f}%  →  "
-                f"{_interpretation_label(semantic_total_dual)}"
-            )
-        print("=" * 72)
-        if semantic_track:
-            _print_track_table(
-                semantic_track,
-                primary="semantic_score",
-                secondary="score",
-                primary_label="Semantic",
-                secondary_label="Rubric",
-                source_label="Semantic src",
-            )
-        else:
-            print("   (no semantic scores available)")
-
-        diverged_count = sum(1 for r in results if r.get("tracks_diverged"))
-        if diverged_count:
-            print(
-                f"\nℹ️  Tracks diverged on {diverged_count} question(s): "
-                "different answers ranked best by rubric vs. semantic "
-                "(marked with D in the tables below)."
-            )
-        return
-
-    semantic_total = weighted_semantic_score(results)
-    print("\n" + "=" * 70)
-    if semantic_total is not None:
-        print(
-            f"📊 FINAL SCORE: rubric {total_score:.1f}%  |  "
-            f"semantic {semantic_total:.1f}%"
+        semantic_total = (
+            weighted_primary_score(semantic_track, "semantic_score")
+            if semantic_track
+            else semantic_total
         )
     else:
-        print(f"📊 FINAL SCORE: rubric {total_score:.1f}%")
+        rubric_total = total_score
+
+    print()
     print("=" * 70)
     if semantic_total is not None:
         print(
-            f"{'Q#':<3} {'Category':<22} {'Rubric':<7} {'Semantic':<9} "
-            f"{'Response Snippet'}"
+            f"📊 FINAL SCORE: rubric {rubric_total:.1f}%  |  "
+            f"semantic {semantic_total:.1f}%"
         )
     else:
-        print(f"{'Q#':<3} {'Category':<25} {'Rubric':<7} {'Response Snippet'}")
-    print("-" * 70)
-    for r in results:
-        semantic_score = r.get("semantic_score")
-        if semantic_total is not None:
-            semantic_label = (
-                f"{int(semantic_score)}%"
-                if isinstance(semantic_score, (int, float))
-                else "—"
-            )
-            print(
-                f"{r['id']:<3} {r['category']:<22} {r['score']:<7} "
-                f"{semantic_label:<9} {r['response_snippet']}"
-            )
-        else:
-            print(
-                f"{r['id']:<3} {r['category']:<25} {r['score']:<7} "
-                f"{r['response_snippet']}"
-            )
-
-    print(f"\n✅ Interpretation (rubric): {_interpretation_label(total_score)}")
+        print(f"📊 FINAL SCORE: rubric {rubric_total:.1f}%")
+    print("=" * 70)
+    print(f"\n✅ Interpretation (rubric): {_interpretation_label(rubric_total)}")
     if semantic_total is not None:
         print("\nℹ️  Semantic score is an independent audit metric vs answers_v2.txt.")
+
+    _print_winner_detail_tables(
+        results,
+        rubric_total=rubric_total,
+        semantic_total=semantic_total,
+    )
 
 
 def _run_model_with_export(
@@ -921,7 +1112,7 @@ def cmd_list_models(args):
             print("   No models found")
             return
 
-        if args.provider in {"lmstudio", "openwebui", "openrouter"}:
+        if args.provider in {"lmstudio", "openwebui", "openrouter", "deepinfra"}:
             for model in models:
                 model_id = model.get("id") or model.get("name", "unknown")
                 print(f"   • {model_id}")
@@ -948,33 +1139,51 @@ def cmd_judge(args) -> int:
 
 
 def cmd_preload_semantic(args):
-    """Download and warm the local semantic scoring model and embedding cache."""
+    """Download and warm the semantic scoring embedder and embedding cache."""
     config = _load_optional_config(args)
     semantic_config = getattr(getattr(config, "scoring", None), "semantic", None) if config else None
 
+    provider = (
+        getattr(args, "semantic_provider", None)
+        or getattr(semantic_config, "provider", None)
+        or DEFAULT_SEMANTIC_PROVIDER
+    ).lower()
     model_name = (
         getattr(args, "semantic_model", None)
         or getattr(semantic_config, "model", None)
         or DEFAULT_SEMANTIC_MODEL
     )
+    if provider == "deepinfra" and model_name == DEFAULT_SEMANTIC_MODEL:
+        model_name = DEFAULT_DEEPINFRA_SEMANTIC_MODEL
     answers_file = (
         getattr(args, "semantic_answers", None)
         or getattr(semantic_config, "answers_file", None)
         or DEFAULT_SEMANTIC_ANSWERS_FILE
     )
     device = getattr(semantic_config, "device", "auto") if semantic_config else "auto"
-    max_seq_length = (
-        getattr(semantic_config, "max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)
-        if semantic_config
-        else DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
+    if semantic_config and semantic_config.max_seq_length_explicit:
+        max_seq_length = semantic_config.max_seq_length
+    else:
+        max_seq_length = default_semantic_max_seq_length(provider=provider)
+    endpoint = getattr(semantic_config, "endpoint", None) if semantic_config else None
+    api_key = (
+        getattr(args, "semantic_api_key", None)
+        or (getattr(semantic_config, "api_key", None) if semantic_config else None)
     )
+    api_key_env = getattr(semantic_config, "api_key_env", "DEEPINFRA_TOKEN") if semantic_config else "DEEPINFRA_TOKEN"
+    if provider == "deepinfra" and not api_key:
+        api_key = os.environ.get(api_key_env)
 
     try:
         result = preload_semantic_scorer(
+            provider=provider,
             model_name=model_name,
             answers_file=answers_file,
             device=device if device != "auto" else None,
             max_seq_length=max_seq_length,
+            endpoint=endpoint,
+            api_key=api_key,
+            api_key_env=api_key_env,
             force=getattr(args, "force", False),
         )
     except (RuntimeError, ValueError, FileNotFoundError) as e:
@@ -982,16 +1191,22 @@ def cmd_preload_semantic(args):
         sys.exit(1)
 
     print("\n✅ Semantic scoring assets preloaded")
+    print(f"   Provider: {result.provider}")
     print(f"   Model: {result.model_name}")
     print(f"   Reference answers: {result.reference_count} from {result.answers_file}")
     if result.encoded_count:
         print(f"   Newly encoded: {result.encoded_count}")
     print(f"   Warmup time: {result.elapsed_s:.1f}s")
     print(f"   Embedding cache: {result.embedding_cache}")
-    print(f"   Hugging Face cache: {result.huggingface_cache}")
+    if result.huggingface_cache is not None:
+        print(f"   Hugging Face cache: {result.huggingface_cache}")
     print("\nLater runs with --semantic will reuse the embedding cache.")
-    print("The embedding model still loads into RAM each process; only download")
-    print("and reference encoding are skipped after preload.")
+    if result.provider == "local":
+        print("The embedding model still loads into RAM each process; only download")
+        print("and reference encoding are skipped after preload.")
+    else:
+        print("DeepInfra reference embeddings are cached locally; live API calls")
+        print("still occur for each model response during the benchmark.")
 
 
 def cmd_interactive(args):
@@ -1011,8 +1226,9 @@ def cmd_interactive(args):
         )
 
         if not client.test_connection():
-            print(f"❌ Cannot connect to {args.provider} at {client.base_url}")
-            print(f"   Is {args.provider} running?")
+            _report_connection_failure(
+                client, args.provider, is_remote=client.base_url.startswith("https://")
+            )
             sys.exit(1)
 
         print(f"🔍 Fetching available models from {args.provider}...\n")
@@ -1026,7 +1242,7 @@ def cmd_interactive(args):
 
         model_options = []
         model_names = []
-        if args.provider in {"lmstudio", "openwebui", "openrouter"}:
+        if args.provider in {"lmstudio", "openwebui", "openrouter", "deepinfra"}:
             for model in models:
                 model_id = model.get("id") or model.get("name", "unknown")
                 model_options.append(model_id)
@@ -1070,25 +1286,24 @@ def cmd_interactive(args):
             print(f"❌ Error: {e}")
             sys.exit(1)
         scorer_bundle = _create_scorer_bundle(args, config, questions)
+        semantic_scorer_bundle = _create_semantic_scorer_bundle(args, config, questions)
+        optimizer = _initialize_optimizer(args, config, default_optimizer_endpoint)
         _sem = getattr(args, "semantic", False)
         _scoring_label = (
             f"{scorer_bundle.method_label} + semantic"
             if _sem
             else scorer_bundle.method_label
         )
-        _opt = getattr(args, "optimize_prompts", False)
-        if _opt and _sem:
+        if optimizer and _sem:
             _scoring_label += " (dual-track)"
         print(f"✓ Using {_scoring_label} scoring\n")
-        semantic_scorer_bundle = _create_semantic_scorer_bundle(args, config, questions)
 
         reference_answers = {}
-        if args.optimize_prompts:
+        if optimizer:
             reference_answers = parse_reference_answers(
                 config.answers_file if config else "answers_all.txt"
             )
 
-        optimizer = _initialize_optimizer(args, default_optimizer_endpoint)
         langfuse_config = _langfuse_config_or_none(config)
         all_results = []
         interrupted = False
@@ -1118,6 +1333,21 @@ def cmd_interactive(args):
                     try:
                         if not model_client.test_connection():
                             print(f"❌ Cannot connect to model {model_name}")
+                            detail = getattr(model_client, "last_probe_error", None)
+                            if detail:
+                                print(f"   Reason: {detail}")
+                            continue
+
+                        try:
+                            _validate_model_available(
+                                model_client,
+                                model_name,
+                                provider=args.provider,
+                                role="target",
+                            )
+                        except SystemExit as e:
+                            print(f"❌ {e}")
+                            print(f"   Skipping {model_name}")
                             continue
 
                         # Target only -- never optimizer.optimizer_client, even
@@ -1286,14 +1516,12 @@ def cmd_run_benchmark(args):
                 if is_remote:
                     print(
                         f"⏳ Probing {client.base_url} "
-                        f"(Cloud Run cold start can take 1–3 min, probe timeout {getattr(client, 'timeout', 150)}s)..."
+                        f"(Cloud Run cold start can take 1–3 min; "
+                        f"{getattr(client, '_probe_attempts', lambda: 10)()} retries, "
+                        f"{getattr(client, 'timeout', 150)}s per attempt)..."
                     )
                 if not client.test_connection():
-                    print(f"❌ Cannot connect to {args.provider} at {client.base_url}")
-                    if is_remote:
-                        print("   Check: gcloud auth login, correct service URL, and that the service is deployed.")
-                    else:
-                        print(f"   Is {args.provider} running?")
+                    _report_connection_failure(client, args.provider, is_remote=is_remote)
                     sys.exit(1)
 
                 print(f"🚀 Red Team AI Benchmark v{BENCHMARK_VERSION}")
@@ -1311,6 +1539,13 @@ def cmd_run_benchmark(args):
                 print(f"   Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run_started_at))}")
                 print("   Evaluating uncensoredness & technical accuracy\n")
 
+                _validate_model_available(
+                    client,
+                    args.model,
+                    provider=args.provider,
+                    role="target",
+                )
+
                 # Target only -- runs before the optimizer is created below, so
                 # it structurally cannot touch the optimizer's client/model.
                 try:
@@ -1326,26 +1561,28 @@ def cmd_run_benchmark(args):
                     print(f"❌ Error: {e}")
                     sys.exit(1)
                 scorer_bundle = _create_scorer_bundle(args, config, questions)
+                semantic_scorer_bundle = _create_semantic_scorer_bundle(
+                    args, config, questions
+                )
+                optimizer = _initialize_optimizer(
+                    args, config, args.optimizer_endpoint or client.base_url
+                )
                 _sem = getattr(args, "semantic", False)
                 _scoring_label = (
                     f"{scorer_bundle.method_label} + semantic"
                     if _sem
                     else scorer_bundle.method_label
                 )
-                if getattr(args, "optimize_prompts", False) and _sem:
+                if optimizer and _sem:
                     _scoring_label += " (dual-track)"
                 print(f"✓ Using {_scoring_label} scoring\n")
-                semantic_scorer_bundle = _create_semantic_scorer_bundle(
-                    args, config, questions
-                )
 
                 reference_answers = {}
-                if args.optimize_prompts:
+                if optimizer:
                     reference_answers = parse_reference_answers(
                         config.answers_file if config else "answers_all.txt"
                     )
 
-                optimizer = _initialize_optimizer(args, args.optimizer_endpoint or client.base_url)
                 keepalive = _create_keepalive(client, optimizer, config)
                 if keepalive:
                     keepalive_cfg = _resolve_keepalive_config(config)
@@ -1423,7 +1660,7 @@ def cmd_run_benchmark(args):
 def _add_provider_arg(parser):
     parser.add_argument(
         "provider",
-        choices=["lmstudio", "ollama", "openwebui", "openrouter"],
+        choices=["lmstudio", "ollama", "openwebui", "openrouter", "deepinfra"],
         help="API provider",
     )
 
@@ -1434,7 +1671,8 @@ def _add_endpoint_arg(parser):
         "--endpoint",
         help=(
             "Custom endpoint URL (default: localhost:1234 for lmstudio, "
-            "localhost:11434 for ollama, localhost:3000 for openwebui)"
+            "localhost:11434 for ollama, localhost:3000 for openwebui, "
+            "OpenRouter/DeepInfra cloud defaults)"
         ),
     )
 
@@ -1476,7 +1714,7 @@ def _add_runtime_args(parser):
         "--max-tokens",
         type=int,
         default=None,
-        help="Maximum response tokens per benchmark question (default: config or 768)",
+        help="Maximum response tokens per benchmark question (default: config or 3072)",
     )
     parser.add_argument(
         "--temperature",
@@ -1518,14 +1756,25 @@ def _add_runtime_args(parser):
 
 def _add_optimization_args(parser):
     parser.add_argument(
-        "--optimize-prompts",
+        "--no-optimize",
         action="store_true",
-        help="Enable prompt optimization for censored responses (requires optimizer model)",
+        help="Disable optimization even if optimizer_provider/model are set in config",
     )
     parser.add_argument(
         "--optimizer-model",
-        default="llama3.3:70b",
-        help="Model for prompt optimization (default: llama3.3:70b)",
+        default=None,
+        help="Model name for the optimizer LLM (required with --optimizer-provider)",
+    )
+    parser.add_argument(
+        "--optimizer-provider",
+        default=None,
+        choices=["ollama", "lmstudio", "openwebui", "openrouter", "deepinfra"],
+        help="Provider for the optimizer LLM (required with --optimizer-model)",
+    )
+    parser.add_argument(
+        "--optimizer-api-key",
+        default=None,
+        help="API key for cloud optimizer providers (deepinfra, openrouter)",
     )
     parser.add_argument(
         "--optimizer-endpoint",
@@ -1534,8 +1783,8 @@ def _add_optimization_args(parser):
     parser.add_argument(
         "--max-optimization-iterations",
         type=int,
-        default=4,
-        help="Maximum optimization iterations per question (default: 4, one per strategy)",
+        default=None,
+        help="Maximum optimization iterations per question (default: 4, or config value)",
     )
 
 
@@ -1543,15 +1792,30 @@ def _add_semantic_args(parser):
     parser.add_argument(
         "--semantic",
         action="store_true",
-        help="Enable optional parallel semantic scoring using local embeddings",
+        help="Enable optional parallel semantic scoring",
+    )
+    parser.add_argument(
+        "--semantic-provider",
+        choices=["local", "deepinfra"],
+        default=None,
+        help=(
+            "Semantic embedding provider "
+            f"(default: {DEFAULT_SEMANTIC_PROVIDER}; deepinfra uses Qwen3-Embedding-8B)"
+        ),
     )
     parser.add_argument(
         "--semantic-model",
         default=None,
         help=(
-            "Sentence-transformer model for semantic scoring "
-            f"(default: {DEFAULT_SEMANTIC_MODEL})"
+            "Embedding model for semantic scoring "
+            f"(default: {DEFAULT_SEMANTIC_MODEL} local, "
+            f"{DEFAULT_DEEPINFRA_SEMANTIC_MODEL} for deepinfra)"
         ),
+    )
+    parser.add_argument(
+        "--semantic-api-key",
+        default=None,
+        help="API key for --semantic-provider deepinfra (default: DEEPINFRA_TOKEN env)",
     )
     parser.add_argument(
         "--semantic-answers",
@@ -1596,11 +1860,12 @@ Examples:
   uv run run_benchmark.py run ollama -m "llama3.1:8b" --profile quick
 
   # Run post-hoc LLM-as-Judge over saved v2 results
-  uv run run_benchmark.py judge --results "results_*_v2/*.json" --mode disputed
+  uv run run_benchmark.py judge --results "results/*.json" --mode disputed
 
-  # Warm local semantic embedding cache before a --semantic run
+  # Warm semantic embedding cache before a --semantic run
   uv sync --extra semantic
   uv run run_benchmark.py preload-semantic
+  uv run run_benchmark.py preload-semantic --semantic-provider deepinfra
 
   # Custom endpoint
   uv run run_benchmark.py run ollama -e http://192.168.1.100:11434 -m "mistral"
@@ -1634,9 +1899,15 @@ Examples:
 
     parser_preload = subparsers.add_parser(
         "preload-semantic",
-        help="Download and warm the local semantic scoring model in this VM",
+        help="Warm the semantic embedding cache (local model or DeepInfra API)",
     )
     parser_preload.add_argument("--config", help="Load configuration from YAML file")
+    parser_preload.add_argument(
+        "--semantic-provider",
+        choices=["local", "deepinfra"],
+        default=None,
+        help=f"Embedding provider to preload (default: {DEFAULT_SEMANTIC_PROVIDER})",
+    )
     parser_preload.add_argument(
         "--semantic-model",
         default=None,
@@ -1649,6 +1920,11 @@ Examples:
             "Reference answer file to preload "
             f"(default: {DEFAULT_SEMANTIC_ANSWERS_FILE})"
         ),
+    )
+    parser_preload.add_argument(
+        "--semantic-api-key",
+        default=None,
+        help="API key for --semantic-provider deepinfra (default: DEEPINFRA_TOKEN env)",
     )
     parser_preload.add_argument(
         "--force",

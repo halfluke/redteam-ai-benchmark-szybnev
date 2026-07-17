@@ -24,7 +24,8 @@ from benchmark.io import BenchmarkDataset, load_dataset
 from benchmark.metrics import weighted_score
 
 DEFAULT_DATASET = "datasets/v2/benchmark.jsonl"
-DEFAULT_RESULTS = ["results_*_v2/*.json"]
+# Prefer the exporter layout (./results/results_*.json); keep legacy glob as fallback.
+DEFAULT_RESULTS = ["results/*.json", "results_*_v2/*.json"]
 DEFAULT_OUTPUT_DIR = "judge_results_v2"
 DEFAULT_JUDGE_MODEL = "anthropic/claude-3.5-sonnet"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -1086,6 +1087,16 @@ async def run_async(args: argparse.Namespace) -> int:
     questions = question_index(dataset)
     result_patterns = args.results or DEFAULT_RESULTS
     result_paths = expand_result_paths(result_patterns)
+    if not result_paths:
+        patterns = ", ".join(result_patterns)
+        print(
+            f"❌ No result files matched: {patterns}\n"
+            "   Tip: exporter writes results/results_<model>_<timestamp>.json by default.\n"
+            "   Example: uv run run_benchmark.py judge --results 'results/*.json'",
+            file=sys.stderr,
+        )
+        return 1
+
     output_dir = Path(args.output_dir)
     cache = load_existing_cache(output_dir) if args.resume else {}
 
@@ -1096,6 +1107,16 @@ async def run_async(args: argparse.Namespace) -> int:
             result_payloads.append(load_result_payload(path, questions))
         except JudgeInputError as exc:
             load_errors.append({"source_file": str(path), "error": str(exc)})
+
+    if not result_payloads:
+        print(
+            "❌ No valid result files could be loaded "
+            f"({len(load_errors)} input error(s)).",
+            file=sys.stderr,
+        )
+        for err in load_errors[:5]:
+            print(f"   - {err['source_file']}: {err['error']}", file=sys.stderr)
+        return 1
 
     selected_tasks = build_tasks(
         result_payloads,

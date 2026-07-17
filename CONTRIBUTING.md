@@ -21,7 +21,7 @@ python3 -m compileall -q run_benchmark.py benchmark models scoring utils
 ## Pull Requests
 
 1. Keep changes small and focused.
-2. Update `README.md`, `README.ru.md`, or `docs/agent-reference.md` when user-facing behavior changes.
+2. When user-facing behavior changes, update docs in the same PR. **`README.md` and `README.ru.md` are a bilingual pair — always update both together** (same sections and examples; language only differs). Use `docs/agent-reference.md` for longer implementation notes.
 3. Add or update tests when scoring, export, config, provider, or CLI behavior changes.
 4. Do not commit API keys, model outputs with secrets, private targets, or local `.env` files.
 

@@ -87,22 +87,30 @@ _LEXICAL_METRIC_ALIASES = {
 
 
 def _average_metric(results: List[Dict[str, Any]], metric: str) -> float | None:
+    """Weighted average of a per-question metric (same weights as ``weighted_score``)."""
     metric_keys = [metric]
     alias = _LEXICAL_METRIC_ALIASES.get(metric)
     if alias:
         metric_keys.append(alias)
 
-    values = []
+    total_weight = 0.0
+    weighted_total = 0.0
     for result in results:
         metrics = result.get("metrics") or {}
+        value = None
         for key in metric_keys:
-            value = metrics.get(key)
-            if isinstance(value, (int, float)):
-                values.append(float(value))
+            candidate = metrics.get(key)
+            if isinstance(candidate, (int, float)):
+                value = float(candidate)
                 break
-    if not values:
+        if value is None:
+            continue
+        weight = _question_weight(result)
+        total_weight += weight
+        weighted_total += value * weight
+    if not total_weight:
         return None
-    return round(sum(values) / len(values) * 100, 2)
+    return round(weighted_total / total_weight * 100, 2)
 
 
 def summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -155,26 +163,32 @@ def build_track_results(
 
     The top-level result stays backward-compatible and represents rubric-best.
     This helper exposes a flat shape for aggregate scoring and final tables.
+
+    Semantic-track rows are never dropped for garbage/unscored answers so both
+    tracks keep identical question counts. Missing semantic scores count as 0
+    in ``weighted_primary_score(..., "semantic_score")``.
     """
     projected = []
     key = "rubric_best" if track == "rubric" else "semantic_best"
     for result in results:
         best = result.get(key)
         if not isinstance(best, dict):
+            item = dict(result)
             if track == "semantic" and not isinstance(
-                result.get("semantic_score"), (int, float)
+                item.get("semantic_score"), (int, float)
             ):
-                # Keep API/transport errors (error field set) so both tracks
-                # have identical question counts; score and semantic_score are
-                # already 0 / None from _make_error_result.
-                if result.get("error") is None:
-                    continue
-            projected.append(dict(result))
+                # Garbage / skipped: keep the row and treat as 0 for aggregates.
+                item["semantic_score"] = 0
+            projected.append(item)
             continue
 
         item = dict(result)
+        semantic_score = best.get("semantic_score", result.get("semantic_score"))
+        if track == "semantic" and not isinstance(semantic_score, (int, float)):
+            semantic_score = 0
         item.update(
             {
+                "prompt": best.get("prompt") or result.get("prompt", ""),
                 "score": best.get("score", result.get("score", 0)),
                 "response_snippet": best.get(
                     "response_snippet", result.get("response_snippet", "")
@@ -182,9 +196,7 @@ def build_track_results(
                 "full_response": best.get(
                     "full_response", result.get("full_response", "")
                 ),
-                "semantic_score": best.get(
-                    "semantic_score", result.get("semantic_score")
-                ),
+                "semantic_score": semantic_score,
                 "semantic_similarity": best.get(
                     "semantic_similarity", result.get("semantic_similarity")
                 ),
@@ -193,6 +205,7 @@ def build_track_results(
                 ),
                 "answer_source": best.get("answer_source"),
                 "optimization_strategy": best.get("strategy"),
+                "tracks_diverged": result.get("tracks_diverged"),
             }
         )
         projected.append(item)
@@ -217,28 +230,63 @@ def summarize_track(
     }
 
 
+def _semantic_score_for_summary(result: Dict[str, Any]) -> float | None:
+    """Prefer semantic-best score when dual-track data is present."""
+    best = result.get("semantic_best")
+    if isinstance(best, dict):
+        score = best.get("semantic_score")
+        if isinstance(score, (int, float)):
+            return float(score)
+        # Dual-track present but semantic-best is garbage/unscored.
+        return 0.0
+    score = result.get("semantic_score")
+    if isinstance(score, (int, float)):
+        return float(score)
+    semantic_scores = result.get("semantic_scores") or {}
+    if semantic_scores.get("skipped") or semantic_scores.get("skip_reason"):
+        return 0.0
+    return None
+
+
 def summarize_semantic_results(results: List[Dict[str, Any]]) -> Dict[str, Any] | None:
-    """Build aggregate metrics for optional semantic scoring."""
-    semantic_results = [
-        result
-        for result in results
-        if isinstance(result.get("semantic_score"), (int, float))
-    ]
-    if not semantic_results:
+    """Build aggregate metrics for optional semantic scoring.
+
+    When dual-track optimization data is present, aggregates the semantic-best
+    answer per question (not the rubric-best answer's sibling semantic score).
+    Garbage / skipped semantic answers count as 0 so they cannot inflate totals.
+    """
+    scored: List[Dict[str, Any]] = []
+    similarities: List[float] = []
+    for result in results:
+        score = _semantic_score_for_summary(result)
+        if score is None:
+            continue
+        weight = _question_weight(result)
+        scored.append({"semantic_score": score, "weight": weight})
+        best = result.get("semantic_best") if isinstance(result.get("semantic_best"), dict) else None
+        similarity = None
+        if best is not None:
+            similarity = best.get("semantic_similarity")
+        if not isinstance(similarity, (int, float)):
+            similarity = result.get("semantic_similarity")
+        if isinstance(similarity, (int, float)):
+            similarities.append(float(similarity))
+
+    if not scored:
         return None
 
-    similarities = [
-        float(result["semantic_similarity"])
-        for result in semantic_results
-        if isinstance(result.get("semantic_similarity"), (int, float))
-    ]
-    weighted = weighted_semantic_score(semantic_results)
+    total_weight = sum(item["weight"] for item in scored)
+    weighted = (
+        sum(item["semantic_score"] * item["weight"] for item in scored) / total_weight
+        if total_weight
+        else None
+    )
     return {
         "enabled": True,
         "weighted_score": round(weighted, 2) if weighted is not None else None,
         "similarity_avg": (
             round(sum(similarities) / len(similarities), 6) if similarities else None
         ),
-        "questions": len(semantic_results),
-        "scored_questions": len(semantic_results),
+        "questions": len(scored),
+        "scored_questions": len(scored),
     }

@@ -4,7 +4,7 @@ from typing import Callable, Dict, List, Optional
 
 import requests
 
-from .base import APIClient, RequestsRetryMixin
+from .base import APIClient, RequestsRetryMixin, normalize_message_content
 from .bearer_auth import BearerAuthMixin
 
 
@@ -28,6 +28,7 @@ class LMStudioClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
         self.auth_token_getter = auth_token_getter
         self.invalidate_auth_token = invalidate_auth_token
         self.session = requests.Session()
+        self.last_probe_error = None
 
     def query(
         self,
@@ -51,7 +52,7 @@ class LMStudioClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
             url=url, headers=headers, payload=payload, retries=retries
         )
         try:
-            return data["choices"][0]["message"]["content"]
+            return normalize_message_content(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError) as e:
             raise RuntimeError(f"Invalid API response format: {e}") from e
 
@@ -74,12 +75,11 @@ class LMStudioClient(BearerAuthMixin, RequestsRetryMixin, APIClient):
 
     def test_connection(self) -> bool:
         """Test LM Studio connection."""
-        try:
-            url = f"{self.base_url}/v1/models"
-            response = self.session.get(url, headers=self._auth_headers(), timeout=self._probe_timeout())
-            return response.status_code == 200
-        except Exception:
-            return False
+        url = f"{self.base_url}/v1/models"
+        headers = self._auth_headers()
+        return self._probe_get_with_retries(
+            url, headers, timeout=self._probe_timeout()
+        )
 
     def close(self) -> None:
         """Close the persistent HTTP session."""

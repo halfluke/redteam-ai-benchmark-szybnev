@@ -7,16 +7,31 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from benchmark.types import DEFAULT_MAX_TOKENS
+from scoring.semantic_calibration import (
+    DEFAULT_SEMANTIC_THRESHOLDS,
+    default_semantic_thresholds,
+)
+from scoring.semantic_embedder import DEFAULT_DEEPINFRA_SEMANTIC_MODEL
 from scoring.semantic_scorer import (
     DEFAULT_SEMANTIC_ANSWERS_FILE,
     DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
     DEFAULT_SEMANTIC_MODEL,
-    DEFAULT_SEMANTIC_THRESHOLDS,
+    DEFAULT_SEMANTIC_PROVIDER,
+    default_semantic_max_seq_length,
 )
 
 DEFAULT_QUESTIONS_FILE = "datasets/v2/benchmark.jsonl"
 DEFAULT_ANSWERS_FILE = "answers_all.txt"
 DEFAULT_SCORER = "rubric"
+DEFAULT_OPTIMIZATION_MAX_TOKENS = 2048
+
+
+def default_optimization_max_tokens(*, optimizer_provider: Optional[str]) -> int:
+    """Return provider-aware optimization target max_tokens (matches benchmark default)."""
+    if optimizer_provider and optimizer_provider.lower() == "deepinfra":
+        return DEFAULT_MAX_TOKENS
+    return DEFAULT_OPTIMIZATION_MAX_TOKENS
 
 
 @dataclass
@@ -40,13 +55,19 @@ class SemanticConfig:
     """Configuration for optional parallel semantic scoring."""
 
     enabled: bool = False
+    provider: str = DEFAULT_SEMANTIC_PROVIDER
     answers_file: str = DEFAULT_SEMANTIC_ANSWERS_FILE
     model: str = DEFAULT_SEMANTIC_MODEL
+    endpoint: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_env: str = "DEEPINFRA_TOKEN"
     thresholds: Dict[int, float] = field(
         default_factory=lambda: dict(DEFAULT_SEMANTIC_THRESHOLDS)
     )
+    thresholds_explicit: bool = False
     device: str = "auto"
     max_seq_length: int = DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
+    max_seq_length_explicit: bool = False
 
 
 @dataclass
@@ -70,10 +91,13 @@ class ExportConfig:
 class OptimizationConfig:
     """Configuration for prompt optimization."""
 
-    enabled: bool = False
+    optimizer_provider: Optional[str] = None
     optimizer_model: Optional[str] = None
     optimizer_endpoint: Optional[str] = None
-    max_iterations: int = 3
+    optimizer_api_key: Optional[str] = None
+    max_iterations: int = 4
+    optimization_max_tokens: int = DEFAULT_OPTIMIZATION_MAX_TOKENS
+    optimization_max_tokens_explicit: bool = False
     strategies: List[str] = field(default_factory=lambda: [
         "role_playing",
         "technical",
@@ -102,14 +126,13 @@ class GpuCheckConfig:
     VRAM) and aborts before the paid benchmark starts if too little of it
     is GPU-resident. This catches silent CPU fallback (e.g. a misconfigured
     or broken Ollama GPU backend on Cloud Run) before it burns a full run's
-    worth of time and money. Only meaningful for Ollama-backed clients;
-    unmeasurable for other providers, in which case the check is skipped
-    rather than treated as a failure.
+    worth of time and money. Only meaningful for Ollama-backed clients. When
+    enabled, probe failures abort the run rather than being skipped.
     """
 
     enabled: bool = False
     min_vram_fraction: float = 0.0
-    timeout_s: int = 120
+    timeout_s: int = 210
 
 
 @dataclass
@@ -154,7 +177,7 @@ class BenchmarkConfig:
     questions_file: str = DEFAULT_QUESTIONS_FILE
     answers_file: str = DEFAULT_ANSWERS_FILE
     rate_limit_delay: float = 1.5
-    max_tokens: int = 768
+    max_tokens: int = 3072
     temperature: float = 0.2
     concurrency: int = 1
     request_log: Optional[str] = None
@@ -216,7 +239,7 @@ def _dict_to_gpu_check_config(data: Dict[str, Any]) -> GpuCheckConfig:
     return GpuCheckConfig(
         enabled=data.get("enabled", False),
         min_vram_fraction=data.get("min_vram_fraction", 0.0),
-        timeout_s=data.get("timeout_s", 120),
+        timeout_s=data.get("timeout_s", 210),
     )
 
 
@@ -241,18 +264,38 @@ def _dict_to_scoring_config(data: Dict[str, Any]) -> ScoringConfig:
 
 def _dict_to_semantic_config(data: Dict[str, Any]) -> SemanticConfig:
     """Convert nested semantic scoring config."""
-    raw_thresholds = data.get("thresholds", DEFAULT_SEMANTIC_THRESHOLDS)
+    provider = str(data.get("provider", DEFAULT_SEMANTIC_PROVIDER)).lower()
+    model = data.get("model", DEFAULT_SEMANTIC_MODEL)
+    if provider == "deepinfra" and model == DEFAULT_SEMANTIC_MODEL:
+        model = DEFAULT_DEEPINFRA_SEMANTIC_MODEL
+    thresholds_explicit = "thresholds" in data
+    max_seq_length_explicit = "max_seq_length" in data
+    raw_thresholds = data.get(
+        "thresholds",
+        default_semantic_thresholds(provider=provider, model_name=model),
+    )
     thresholds = {
         int(score): float(threshold)
         for score, threshold in dict(raw_thresholds).items()
     }
     return SemanticConfig(
         enabled=bool(data.get("enabled", False)),
+        provider=provider,
         answers_file=data.get("answers_file", DEFAULT_SEMANTIC_ANSWERS_FILE),
-        model=data.get("model", DEFAULT_SEMANTIC_MODEL),
+        model=model,
+        endpoint=data.get("endpoint"),
+        api_key=data.get("api_key"),
+        api_key_env=data.get("api_key_env", "DEEPINFRA_TOKEN"),
         thresholds=thresholds,
+        thresholds_explicit=thresholds_explicit,
         device=data.get("device", "auto"),
-        max_seq_length=int(data.get("max_seq_length", DEFAULT_SEMANTIC_MAX_SEQ_LENGTH)),
+        max_seq_length=int(
+            data.get(
+                "max_seq_length",
+                default_semantic_max_seq_length(provider=provider),
+            )
+        ),
+        max_seq_length_explicit=max_seq_length_explicit,
     )
 
 
@@ -267,11 +310,21 @@ def _dict_to_export_config(data: Dict[str, Any]) -> ExportConfig:
 
 def _dict_to_optimization_config(data: Dict[str, Any]) -> OptimizationConfig:
     """Convert dict to OptimizationConfig."""
+    optimizer_provider = data.get("optimizer_provider")
+    optimization_max_tokens_explicit = "optimization_max_tokens" in data
     return OptimizationConfig(
-        enabled=data.get("enabled", False),
+        optimizer_provider=optimizer_provider,
         optimizer_model=data.get("optimizer_model"),
         optimizer_endpoint=data.get("optimizer_endpoint"),
-        max_iterations=data.get("max_iterations", 3),
+        optimizer_api_key=data.get("optimizer_api_key"),
+        max_iterations=data.get("max_iterations", 4),
+        optimization_max_tokens=int(
+            data.get(
+                "optimization_max_tokens",
+                default_optimization_max_tokens(optimizer_provider=optimizer_provider),
+            )
+        ),
+        optimization_max_tokens_explicit=optimization_max_tokens_explicit,
         strategies=data.get("strategies", [
             "role_playing", "technical", "few_shot", "cve_framing"
         ]),
@@ -362,7 +415,7 @@ def load_config(config_path: str) -> BenchmarkConfig:
         questions_file=data.get("questions_file", DEFAULT_QUESTIONS_FILE),
         answers_file=data.get("answers_file", DEFAULT_ANSWERS_FILE),
         rate_limit_delay=data.get("rate_limit_delay", 1.5),
-        max_tokens=data.get("max_tokens", 768),
+        max_tokens=data.get("max_tokens", 3072),
         temperature=data.get("temperature", 0.2),
         concurrency=data.get("concurrency", 1),
         request_log=data.get("request_log"),
@@ -401,6 +454,10 @@ def validate_config(config: BenchmarkConfig) -> None:
     ]
     if ordered_thresholds != sorted(ordered_thresholds, reverse=True):
         raise ValueError("scoring.semantic.thresholds must decrease as scores decrease")
+    if config.scoring.semantic.provider not in {"local", "deepinfra"}:
+        raise ValueError(
+            f"Unsupported scoring.semantic.provider: {config.scoring.semantic.provider}"
+        )
 
     unsupported_formats = set(config.export.formats) - {"json", "csv", "criteria_csv"}
     if unsupported_formats:
@@ -436,6 +493,15 @@ def validate_config(config: BenchmarkConfig) -> None:
                 config.cloudrun_cost.gpu_type,
                 config.cloudrun_cost.gpu_zonal_redundancy,
             )
+
+    opt = config.optimization
+    if bool(opt.optimizer_provider) != bool(opt.optimizer_model):
+        raise ValueError(
+            "optimization.optimizer_provider and optimization.optimizer_model "
+            "must be set together"
+        )
+    if opt.optimization_max_tokens <= 0:
+        raise ValueError("optimization.optimization_max_tokens must be > 0")
 
 
 def create_default_config(
@@ -487,8 +553,11 @@ def save_config(config: BenchmarkConfig, config_path: str) -> None:
             "method": config.scoring.method,
             "semantic": {
                 "enabled": config.scoring.semantic.enabled,
+                "provider": config.scoring.semantic.provider,
                 "answers_file": config.scoring.semantic.answers_file,
                 "model": config.scoring.semantic.model,
+                "endpoint": config.scoring.semantic.endpoint,
+                "api_key_env": config.scoring.semantic.api_key_env,
                 "thresholds": config.scoring.semantic.thresholds,
                 "device": config.scoring.semantic.device,
                 "max_seq_length": config.scoring.semantic.max_seq_length,
@@ -499,8 +568,8 @@ def save_config(config: BenchmarkConfig, config_path: str) -> None:
             "output_dir": config.export.output_dir,
         },
         "optimization": {
-            "enabled": config.optimization.enabled,
             "max_iterations": config.optimization.max_iterations,
+            "optimization_max_tokens": config.optimization.optimization_max_tokens,
         },
         "questions_file": config.questions_file,
         "answers_file": config.answers_file,
@@ -518,8 +587,12 @@ def save_config(config: BenchmarkConfig, config_path: str) -> None:
         data["provider"]["default_model"] = config.provider.default_model
     if config.provider.keep_alive:
         data["provider"]["keep_alive"] = config.provider.keep_alive
+    if config.optimization.optimizer_provider:
+        data["optimization"]["optimizer_provider"] = config.optimization.optimizer_provider
     if config.optimization.optimizer_model:
         data["optimization"]["optimizer_model"] = config.optimization.optimizer_model
+    if config.optimization.optimizer_endpoint:
+        data["optimization"]["optimizer_endpoint"] = config.optimization.optimizer_endpoint
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

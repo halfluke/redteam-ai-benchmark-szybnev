@@ -7,9 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from benchmark.metrics import build_track_results, diverged_marker
-
-
 def _serialize_value(value: Any) -> Any:
     """Recursively serialize a value for JSON export."""
     if is_dataclass(value) and not isinstance(value, type):
@@ -95,7 +92,7 @@ class BenchmarkExporter:
             "results": [
                 {
                     **_serialize_value(r),
-                    "diverged": diverged_marker(r),
+                    "diverged": _diverged_marker(r),
                 }
                 for r in results
             ],
@@ -110,7 +107,10 @@ class BenchmarkExporter:
 
         has_dual_track = any(r.get("semantic_best") for r in results)
         if has_dual_track:
-            from benchmark.metrics import weighted_primary_score  # noqa: PLC0415
+            from benchmark.metrics import (  # noqa: PLC0415
+                build_track_results,
+                weighted_primary_score,
+            )
 
             rubric_track = build_track_results(results, track="rubric")
             semantic_track = build_track_results(results, track="semantic")
@@ -125,7 +125,7 @@ class BenchmarkExporter:
                     "semantic_score": row.get("semantic_score"),
                     "answer_source": row.get("answer_source"),
                     "optimization_strategy": row.get("optimization_strategy"),
-                    "diverged": diverged_marker(row),
+                    "diverged": _diverged_marker(row),
                     "response_snippet": row.get("response_snippet"),
                 }
 
@@ -200,7 +200,7 @@ class BenchmarkExporter:
             for result in results:
                 row = {
                     "id": result.get("id", ""),
-                    "diverged": diverged_marker(result),
+                    "diverged": _diverged_marker(result),
                     "category": result.get("category", ""),
                     "score": result.get("score", 0),
                     "censored": result.get("censored", False),
@@ -345,6 +345,13 @@ def export_results(
         )
 
     return exported
+
+
+def _diverged_marker(result: Dict[str, Any]) -> str:
+    """Lazy wrapper so ``import utils`` does not pull in ``benchmark``."""
+    from benchmark.metrics import diverged_marker  # noqa: PLC0415
+
+    return diverged_marker(result)
 
 
 def get_interpretation(score: float) -> str:

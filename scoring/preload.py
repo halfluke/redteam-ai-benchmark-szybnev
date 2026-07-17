@@ -1,4 +1,4 @@
-"""Warm up semantic scoring assets on the local machine."""
+"""Warm up semantic scoring assets."""
 
 import os
 import time
@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .semantic_embedder import DEFAULT_DEEPINFRA_SEMANTIC_MODEL
 from .semantic_scorer import (
     DEFAULT_SEMANTIC_ANSWERS_FILE,
-    DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
     DEFAULT_SEMANTIC_MODEL,
+    DEFAULT_SEMANTIC_PROVIDER,
     SemanticScorer,
+    default_semantic_max_seq_length,
     parse_semantic_references,
 )
 
@@ -19,13 +21,14 @@ from .semantic_scorer import (
 class SemanticPreloadResult:
     """Summary of a semantic preload run."""
 
+    provider: str
     model_name: str
     answers_file: str
     elapsed_s: float
     reference_count: int
     encoded_count: int
     embedding_cache: Path
-    huggingface_cache: Path
+    huggingface_cache: Optional[Path]
 
 
 def huggingface_cache_dir() -> Path:
@@ -33,7 +36,7 @@ def huggingface_cache_dir() -> Path:
     return Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface"))
 
 
-def _require_semantic_dependencies() -> None:
+def _require_local_semantic_dependencies() -> None:
     try:
         import sentence_transformers  # noqa: F401
     except ImportError as e:
@@ -44,20 +47,28 @@ def _require_semantic_dependencies() -> None:
 
 def preload_semantic_scorer(
     *,
+    provider: str = DEFAULT_SEMANTIC_PROVIDER,
     model_name: str = DEFAULT_SEMANTIC_MODEL,
     answers_file: str = DEFAULT_SEMANTIC_ANSWERS_FILE,
     cache_dir: Optional[str | Path] = None,
     device: Optional[str] = None,
     max_seq_length: Optional[int] = None,
+    endpoint: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_key_env: str = "DEEPINFRA_TOKEN",
     force: bool = False,
 ) -> SemanticPreloadResult:
     """
-    Download/load the embedding model and warm the reference-answer cache.
+    Warm the reference-answer embedding cache for later ``--semantic`` runs.
 
-    This does not keep a daemon running; it prepares on-disk caches so later
-    benchmark runs with ``--semantic`` start faster.
+    Local provider: downloads/loads SentenceTransformer weights.
+    DeepInfra provider: encodes references through the remote embeddings API.
     """
-    _require_semantic_dependencies()
+    provider = provider.lower()
+    if provider == "local":
+        _require_local_semantic_dependencies()
+    if provider == "deepinfra" and model_name == DEFAULT_SEMANTIC_MODEL:
+        model_name = DEFAULT_DEEPINFRA_SEMANTIC_MODEL
 
     references = parse_semantic_references(answers_file)
     questions = [{"id": q_id} for q_id in sorted(references)]
@@ -65,8 +76,12 @@ def preload_semantic_scorer(
         questions,
         answers_file=answers_file,
         model_name=model_name,
+        provider=provider,
         device=device,
-        max_seq_length=max_seq_length or DEFAULT_SEMANTIC_MAX_SEQ_LENGTH,
+        max_seq_length=max_seq_length,
+        endpoint=endpoint,
+        api_key=api_key,
+        api_key_env=api_key_env,
         cache_dir=cache_dir,
     )
 
@@ -75,11 +90,12 @@ def preload_semantic_scorer(
     elapsed_s = time.time() - started
 
     return SemanticPreloadResult(
+        provider=provider,
         model_name=model_name,
         answers_file=answers_file,
         elapsed_s=elapsed_s,
         reference_count=warmup["reference_count"],
         encoded_count=warmup["encoded_count"],
         embedding_cache=warmup["cache_file"],
-        huggingface_cache=huggingface_cache_dir(),
+        huggingface_cache=huggingface_cache_dir() if provider == "local" else None,
     )

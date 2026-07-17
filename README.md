@@ -4,6 +4,8 @@
 
 **Russian version:** [README.ru.md](README.ru.md)
 
+> **README sync:** Keep [README.md](README.md) and [README.ru.md](README.ru.md) in sync — same sections, features, and CLI examples; only the language differs. Update both in the same change when user-facing docs change.
+
 Red Team AI Benchmark is a CLI benchmark for choosing base LLMs for authorized red-team and offensive-security work. Version 2 uses a rubric-based dataset instead of judging answers only against one golden response.
 
 ---
@@ -18,11 +20,11 @@ This branch extends upstream `v2` with Cloud Run authentication, background keep
 | `cloudrun_identity` auth type in provider config | ☁️ Cloud Run | YAML config gains `auth: cloudrun_identity` and optional `cloudrun_audience` / `cloudrun_impersonate_service_account` fields. Ignored when targeting local endpoints. |
 | Background keepalive (`benchmark/keepalive.py`) | ☁️ Cloud Run | Periodically pings the target model during a benchmark run so Cloud Run services do not scale to zero between questions. Configured under `keepalive:` in YAML. Has no effect unless explicitly enabled. |
 | `_probe_timeout()` on Ollama and LM Studio clients | ☁️ Cloud Run | Uses a 5-second timeout for local HTTP endpoints and the full configured `timeout` for HTTPS/Cloud Run endpoints when testing connectivity. Prevents false-negative "cannot connect" errors on cold-start services. |
-| Cloud Run example configs (`configs/`) | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml`, `configs/cloudrun_vllm_deephat.yaml`, and `configs/cloudrun_ollama_bugtrace.yaml` (4096 max tokens) show working setups with auth, keepalive, and rubric scoring. |
+| Cloud Run example configs (`configs/`) | ☁️ Cloud Run | `configs/cloudrun_ollama.yaml`, `configs/cloudrun_vllm_deephat.yaml`, and `configs/cloudrun_ollama_bugtrace.yaml` (3072 max tokens) show working setups with auth, keepalive, and rubric scoring. |
 | Helper scripts (`scripts/`) | ☁️ Cloud Run | Shell scripts for sourcing Cloud Run environment variables, warming up services, and running benchmarks (`warmup_*`, `run_*_baseline.sh`). Includes `local_env.sh.example` for local endpoint overrides (gitignored). |
-| Optimization trigger threshold: `<= 33%` | ✅ General | Optimization fires whenever the baseline score is 33% or lower, not only on fully censored (0%) responses. |
-| Optimization runs all strategies | ✅ General | With `--optimize-prompts`, the runner tries every configured optimization strategy (default: 4) and keeps the best-scoring reframed prompt/response. It no longer stops early at 50%. |
-| Per-question output format | ✅ General | Non-optimized questions print `Final: rubric X% \| semantic Y% \| duration \| snippet`. Questions that trigger optimization print a `Baseline:` line (with both rubric and semantic scores) before the optimization block, and end with a `Best —` summary of the winning scores for each track. |
+| Optimization trigger: rubric or semantic below 25% | ✅ General | Optimization fires when baseline rubric or semantic score is **below 25%**, or when semantic scoring is skipped as garbage. Scores at/above 25% on both tracks do not trigger. |
+| Optimization early exit at 75%+ tracks | ✅ General | When `--semantic` is active, the loop stops as soon as the best rubric score and best semantic score (across all attempts) are both **≥ 75%** and semantic is not garbage. Without `--semantic`, it stops once rubric-best is **≥ 75%**. Up to four strategies may run if a track stays below 75%. |
+| Per-question output format | ✅ General | Non-optimized questions print `Final: rubric X% \| semantic Y% \| duration \| snippet`. Questions that trigger optimization print a `Baseline:` line (with both rubric and semantic scores) before the optimization block, and end with a `Best —` summary of the winning scores for each track. The final report ends with **Rubric Winners** and **Semantic Winners** tables (Q#, score, source, full question text) when applicable. |
 | 4-strategy round-robin optimizer | ✅ General | Each optimization attempt uses the next strategy in a fixed cycle — `role_playing → technical → few_shot → cve_framing` — instead of always picking between two based on whether the response was censored. Default maximum attempts changed from 5 to 4 (one per strategy). |
 | Verbose optimization output | ✅ General | After each attempt the optimizer prints the reframed prompt snippet, the model's response snippet, and both rubric and semantic scores (when `--semantic` is active). After all iterations a `Best —` summary shows the best rubric and semantic scores found. The final per-question lines and the summary tables include the source of each winner (`baseline`, `opt/role_playing`, etc.). |
 | Keepalive correctness during optimization | ☁️ Cloud Run | `optimize_prompt()` gains a `keepalive` parameter. The target and optimizer LLM calls are wrapped with `keepalive_busy()` so the keepalive thread stops pinging while those calls are in flight, preventing spurious timeout warnings and keeping the model warm between attempts. |
@@ -32,7 +34,8 @@ This branch extends upstream `v2` with Cloud Run authentication, background keep
 | Score rationale (`Why: ...`) | ✅ General | When the rubric scorer (v2) is active, a `Why:` line is printed under each score explaining the deterministic cause: `N/M criteria passed: <ids> \| missing: <ids>` for a partial/normal score, `refused (censored)` for a refusal, or `fatal_error: <id>` when a `fatal_errors` pattern matched. Printed for the baseline answer, the post-optimization answer, and in the concurrent runner. Silently omitted for non-rubric scorers (e.g. plain keyword scorer), which have no per-criterion breakdown. |
 | Fix: optimizer discarding real 0%-scored responses | ✅ General | `PromptOptimizer.optimize_prompt()` tracked the best attempt using a `best_score = 0` sentinel with a strict `score > best_score` comparison, so when the original prompt *and every optimization attempt* for a question scored exactly `0%`, the initial `best_response = ""` placeholder was never overwritten — the real (if keyword-mismatched) model output was silently discarded and the exported result showed an empty `full_response` at a genuine (non-empty) latency. Fixed by using a `-1` sentinel so the first attempt's response is always captured regardless of score. |
 | Estimated Cloud Run cost (`cloudrun_cost:` in YAML) | ☁️ Cloud Run | Optional, disabled by default. Prints one estimated cost line at the end of a run (or once per model in `interactive` mode), computed from published on-demand instance-based-billing rates (CPU/memory/GPU per second, see `utils/cloudrun_cost.py`) times observed instance uptime. This is an estimate, not the authoritative GCP invoice — real billing data lags actual usage by ~24h with no real-time API. See `docs/agent-reference.md` for details and caveats. |
-| Pre-flight GPU residency check (`gpu_check:` in YAML / `--min-vram-fraction`) | ☁️ Cloud Run | Optional, disabled by default. Before the paid benchmark starts, loads the model and asks Ollama's own `/api/ps` how much of it (`size_vram` vs `size`) is actually resident in GPU VRAM, aborting if it's below a configured fraction — catches silent CPU fallback on a broken/misconfigured Ollama GPU backend before it wastes a full run's worth of Cloud Run GPU billing and wall-clock time (this happened in practice: see [`ollama/ollama#16449`](https://github.com/ollama/ollama/issues/16449) and the `v0.24.0` pin in `GCP-CLOUDRUN-AImodels/README.md`). Uses Ollama's own accounting rather than an inferred speed heuristic, so it needs no per-model calibration. Only measurable for Ollama clients; skipped for other providers. Applies to the target model only — never the `--optimize-prompts` optimizer, which commonly runs on a separate, often local, non-Cloud-Run endpoint. See `configs/cloudrun_ollama.yaml` / `configs/cloudrun_ollama_bugtrace.yaml`. |
+| Pre-flight GPU residency check (`gpu_check:` in YAML / `--min-vram-fraction`) | ☁️ Cloud Run | Optional, disabled by default. Before the paid benchmark starts, loads the model and asks Ollama's own `/api/ps` how much of it (`size_vram` vs `size`) is actually resident in GPU VRAM, aborting if it's below a configured fraction — catches silent CPU fallback on a broken/misconfigured Ollama GPU backend before it wastes a full run's worth of Cloud Run GPU billing and wall-clock time (this happened in practice: see [`ollama/ollama#16449`](https://github.com/ollama/ollama/issues/16449) and the `v0.24.0` pin in `GCP-CLOUDRUN-AImodels/README.md`). Uses Ollama's own accounting rather than an inferred speed heuristic, so it needs no per-model calibration. Only measurable for Ollama clients; skipped for other providers. Applies to the target model only — never the optimizer, which commonly runs on a separate, often local, non-Cloud-Run endpoint. See `configs/cloudrun_ollama.yaml` / `configs/cloudrun_ollama_bugtrace.yaml`. |
+| Provider-agnostic optimizer (`--optimizer-provider`) | ✅ General | Optimizer LLM can be Ollama, LM Studio, OpenWebUI, OpenRouter, or DeepInfra. `--optimizer-provider` and `--optimizer-model` are an atomic pair (both required to enable optimization, or neither). Cloud providers fail fast at init if no API key is set. |
 
 ### Running on Cloud Run
 
@@ -50,7 +53,7 @@ To keep a Cloud Run service warm during the run, add `keepalive: enabled: true` 
 
 To avoid paying for a full run that's silently stuck on CPU, add `gpu_check: enabled: true` with a `min_vram_fraction` threshold to your YAML config (already set in `configs/cloudrun_ollama.yaml` and `configs/cloudrun_ollama_bugtrace.yaml`), or pass `--min-vram-fraction 0.9` on the command line.
 
-BugTrace Apex 26B Q4 (Ollama on Cloud Run, `max_tokens=4096`):
+BugTrace Apex 26B Q4 (Ollama on Cloud Run, `max_tokens=3072`):
 
 ```bash
 source scripts/local_env.sh          # optional: set BUGTRACE_ENDPOINT / BUGTRACE_MODEL
@@ -64,7 +67,7 @@ The default v2 suite contains 60 questions in `datasets/v2/benchmark.jsonl`, gro
 ## v2 Local Leaderboard
 
 Top local models from the June 2026 v2 run, sorted by `judge_adjusted_score`.
-The run used the full `standard` profile, Ollama, `max_tokens=4096`, `temperature=0.2`,
+The run used the full `standard` profile, Ollama, `max_tokens=3072`, `temperature=0.2`,
 and post-hoc disputed-case LLM-as-Judge via OpenRouter `deepseek/deepseek-v4-flash`.
 
 | Rank | Model | Rubric | Judge-adjusted | Judge critical error rate |
@@ -126,13 +129,16 @@ Requirements:
 
 - Python `3.13+`
 - `uv`
-- One provider: Ollama, LM Studio, OpenWebUI, or OpenRouter
+- One provider: Ollama, LM Studio, OpenWebUI, OpenRouter, or DeepInfra
 
-Install base dependencies:
+Install base dependencies **from the repository root**:
 
 ```bash
+cd /path/to/redteam-ai-benchmark
 uv sync
 ```
+
+Run every CLI command from the repository root. Dataset paths (`datasets/v2/benchmark.jsonl`), answer files (`answers_v2.txt`, `answers_all.txt`), configs, and default export/cache directories are resolved relative to the current working directory. A wheel/`redteam-benchmark` console script install does not embed those data files; full benchmark runs are supported only when the cwd is the repo root (or you pass absolute paths for every file input).
 
 ## Providers
 
@@ -142,6 +148,7 @@ uv sync
 | `lmstudio` | `http://localhost:1234` | OpenAI-compatible LM Studio API |
 | `openwebui` | `http://localhost:3000` | OpenAI-compatible OpenWebUI API |
 | `openrouter` | `https://openrouter.ai/api/v1` | Requires an API key |
+| `deepinfra` | `https://api.deepinfra.com/v1/openai` | Requires `DEEPINFRA_TOKEN` or `--api-key` |
 
 ## Usage
 
@@ -200,38 +207,68 @@ Runtime scoring is always `rubric`. It is deterministic and does not require an 
 
 Runtime scoring does not support legacy `keyword`, `semantic`, or `hybrid` modes. Use the offline `judge` command for post-hoc LLM-as-Judge auditing.
 
-Optional embedded semantic scoring is available as a parallel audit metric. It does not replace rubric scoring: `score`, `total_score`, and base interpretation labels remain rubric-based. Semantic scoring compares each question's answer against `answers_v2.txt` using a local embedding model.
+Optional embedded semantic scoring is available as a parallel audit metric. It does not replace rubric scoring: `score`, `total_score`, and base interpretation labels remain rubric-based. Semantic scoring compares each question's answer against `answers_v2.txt` using either a local SentenceTransformer model or DeepInfra embeddings.
 
-Install semantic dependencies:
+**Local provider** (default: `Qwen/Qwen3-Embedding-0.6B`):
 
 ```bash
 uv sync --extra semantic
+uv run run_benchmark.py run ollama -m "llama3.1:8b" --semantic
+uv run run_benchmark.py preload-semantic
 ```
 
-Run with semantic audit scoring only:
+**DeepInfra provider** (default: `Qwen/Qwen3-Embedding-8B`, recalibrated score bands):
 
 ```bash
-uv run run_benchmark.py run ollama -m "llama3.1:8b" --semantic
+export DEEPINFRA_TOKEN="your-token"
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --semantic --semantic-provider deepinfra
+uv run run_benchmark.py preload-semantic --semantic-provider deepinfra
 ```
+
+Or configure in YAML (`scoring.semantic.provider: deepinfra`).
+
+### Reference embedding cache
+
+`preload-semantic` warms a **local disk cache of reference-answer embeddings** from `answers_v2.txt` (or `scoring.semantic.answers_file`). **Model responses during a benchmark run are not cached** — with DeepInfra, every live answer still calls the embedding API at runtime.
+
+Cache files live under `.cache/redteam/semantic/` (override with `REDTEAM_SEMANTIC_CACHE_DIR`). Each file is named `<ModelName>_<digest16>.json`, where the digest covers the answers file path, full reference text, `max_seq_length`, semantic scorer version, and provider. Changing any of those produces a new cache file; older files are left on disk but unused.
+
+| Situation | Behavior |
+|-----------|----------|
+| First run / missing cache file | Encodes all reference answers |
+| Reference text changed | Re-encodes only changed question ids; reuses the rest (per-answer SHA-256 hashes) |
+| Legacy cache without hashes | One-time full re-encode into the current format |
+| Different provider, model, `max_seq_length`, or scorer version | New cache file; may import matching entries from a sibling cache |
+
+When the cache is already complete, preload prints `Reference embedding cache already warm (60 answers)` and skips API calls. During `run`, missing entries are encoded on the fly and written back — a warm preload avoids that overhead.
+
+**Force a full rebuild:**
+
+```bash
+uv run run_benchmark.py preload-semantic --semantic-provider deepinfra --force
+```
+
+Or delete the cache file or directory under `.cache/redteam/semantic/`. The `--force` flag is available on `preload-semantic` only, not on `run`.
 
 This adds `semantic_score` and `semantic_similarity` columns to the final table alongside rubric scores, without changing the rubric total or interpretation.
 
-Warm the local reference-embedding cache before a long semantic run:
+Semantic scoring uses full-answer cosine bands by default: `100/90/80/70/60/50/40/30/0`. DeepInfra 8B uses recalibrated thresholds (see `scoring/semantic_calibration.py`). JSON and CSV exports add `semantic_score` and `semantic_similarity` fields without changing rubric totals.
 
-```bash
-uv run run_benchmark.py preload-semantic
-uv run run_benchmark.py preload-semantic --config config.yaml
-```
+Before encoding, the semantic scorer:
 
-Semantic scoring uses full-answer cosine bands by default: `100/90/80/70/60/50/40/30/0`. JSON and CSV exports add `semantic_score` and `semantic_similarity` fields without changing rubric totals.
+- Strips **closed** reasoning/thinking blocks (BugTrace/DeepHat channel markers, Qwen3/DeepSeek `redacted_thinking`, DeepSeek-R1 `xml_think`, pipe/XML/bracket variants). Only full open+close blocks are removed; unclosed prefixes stay intact. Pattern names and hex close-tag checks live in `scoring/semantic_scorer.py` and `tests/test_thinking_strip.py`.
+- Skips degenerate repetitive outputs as `semantic skipped (garbage)` when word diversity is too low (≥24 words and unique-word ratio &lt; 0.12). A garbage baseline with a high rubric score can still trigger prompt optimization.
+- Caps the embedding window at **2048 tokens** for the local provider (`scoring.semantic.max_seq_length`). DeepInfra defaults to **3072** (same as target `max_tokens`) when `max_seq_length` is omitted.
 
-Reasoning/thinking blocks (`<think>…</think>`, `<|channel>thought…<channel|>`, etc.) are automatically stripped from model responses before encoding. Only the substantive answer is compared against the reference. The embedding window is capped at 1024 tokens.
+When `--request-log` is enabled, each semantic-scored JSONL row also includes `thinking_stripped_chars`, `thinking_stripped_tokens_est`, and `strip_matched_pattern` (top-level and inside `semantic_scores`).
 
 ### Dual-track mode (optimization + semantic)
 
-When `--optimize-prompts` and `--semantic` are both enabled:
+When both optimizer flags (`--optimizer-provider` + `--optimizer-model`) and `--semantic` are enabled:
 
-- The optimizer also triggers when the **semantic** score is ≤ 33 %, not just the rubric score.
+- The optimizer also triggers when the **semantic** score is **below 25%**, when semantic scoring is skipped as **garbage**, or when rubric is **below 25%**.
+- When `--semantic` is active, the loop stops early once the best rubric and best semantic scores across attempts are both **≥ 75%** (semantic must not be garbage). Without `--semantic`, early exit is rubric-only at **≥ 75%**.
 - Each optimization attempt is scored on both metrics independently.
 - The run keeps two winners per question: the answer with the highest rubric score and the answer with the highest semantic score.
 - The final report shows two separate tables and interpretations — one per track.
@@ -240,11 +277,11 @@ When `--optimize-prompts` and `--semantic` are both enabled:
 ```bash
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \
   --semantic \
-  --optimize-prompts \
+  --optimizer-provider ollama \
   --optimizer-model "llama3.3:70b"
 ```
 
-Without `--optimize-prompts`, `--semantic` adds a single merged table with both columns (no dual-track split).
+Without an optimizer configured, `--semantic` still prints separate **Rubric Winners** and **Semantic Winners** tables (no merged per-question snippet table).
 
 ## Offline LLM-as-Judge
 
@@ -252,7 +289,7 @@ Saved v2 result JSON files can be audited post-hoc without rerunning benchmark m
 
 ```bash
 OPENROUTER_API_KEY=... uv run run_benchmark.py judge \
-  --results "results_*_v2/*.json" \
+  --results "results/*.json" \
   --dataset datasets/v2/benchmark.jsonl \
   --judge-model "deepseek/deepseek-v4-flash" \
   --output-dir judge_results_v2 \
@@ -260,7 +297,7 @@ OPENROUTER_API_KEY=... uv run run_benchmark.py judge \
   --concurrency 4
 ```
 
-The judge command writes `per_model/*.json`, `detailed.csv`, `summary.csv`, and `disputed_cases.csv`. `judge_score` is the judged subset score; use `judge_adjusted_score` for the rubric score with judged disputed cases replaced. LLM-as-Judge output is an audit layer and does not overwrite deterministic benchmark results.
+Default result globs (when `--results` is omitted) are `results/*.json` and `results_*_v2/*.json`. Zero matches is an error. The judge command writes `per_model/*.json`, `detailed.csv`, `summary.csv`, and `disputed_cases.csv`. `judge_score` is the judged subset score; use `judge_adjusted_score` for the rubric score with judged disputed cases replaced. LLM-as-Judge output is an audit layer and does not overwrite deterministic benchmark results.
 
 ## Configuration
 
@@ -277,8 +314,10 @@ scoring:
   method: rubric
   semantic:
     enabled: false
+    provider: local  # or deepinfra (Qwen/Qwen3-Embedding-8B, requires DEEPINFRA_TOKEN)
     answers_file: answers_v2.txt
     model: Qwen/Qwen3-Embedding-0.6B
+    # Omit thresholds when using provider: deepinfra to get recalibrated 8B bands.
     thresholds:
       100: 0.92
       90: 0.88
@@ -289,6 +328,7 @@ scoring:
       40: 0.65
       30: 0.60
     device: auto
+    max_seq_length: 2048  # local; omit for deepinfra to use 3072
 
 export:
   formats:
@@ -298,10 +338,17 @@ export:
   output_dir: ./results
   include_response: true
 
+optimization:
+  optimizer_provider: ollama          # or: deepinfra, openrouter, lmstudio, openwebui
+  optimizer_model: llama3.3:70b
+  # optimizer_endpoint: http://localhost:11434
+  # optimizer_api_key: ...            # for deepinfra/openrouter; prefer env var
+  max_iterations: 4
+
 questions_file: datasets/v2/benchmark.jsonl
 answers_file: answers_all.txt
 rate_limit_delay: 1.5
-max_tokens: 1024
+max_tokens: 3072
 temperature: 0.2
 concurrency: 1
 # request_log: ./results/requests.jsonl
@@ -355,15 +402,36 @@ CSV output contains per-question rows plus a `TOTAL` row. `criteria_csv` adds on
 
 ## Prompt Optimization
 
-Prompt optimization remains optional and separate from base-model scoring. It runs when the baseline rubric **or** semantic score is **33% or lower** (`OPTIMIZATION_TRIGGER_THRESHOLD` in `benchmark/runner.py`) and `--optimize-prompts` is enabled. By default it tries **all four** reframing strategies once (`--max-optimization-iterations 4`) and independently keeps the **rubric-best** and **semantic-best** answers. Results are written to `optimized_prompts_{model}_{timestamp}.json`.
+Prompt optimization is optional and separate from base-model scoring. Enable it by setting **both** `--optimizer-provider` and `--optimizer-model` (CLI or `optimization:` in config). Omit both for a baseline-only run, or pass `--no-optimize` to disable optimization even when configured in YAML.
+
+Supported optimizer providers: `ollama`, `lmstudio`, `openwebui`, `openrouter`, `deepinfra`. Cloud providers (`openrouter`, `deepinfra`) require an API key via `--optimizer-api-key` or the `OPENROUTER_API_KEY` / `DEEPINFRA_TOKEN` environment variables.
+
+Pre-flight validation runs before the first question:
+
+- `--optimizer-provider` and `--optimizer-model` must be used together (or neither)
+- Cloud providers without an API key abort immediately with a clear error
+
+Optimization runs when the baseline rubric **or** semantic score is **below 25%**, or when semantic scoring is skipped as **garbage** (see `should_trigger_prompt_optimization()` in `optimization/policy.py`). By default it tries up to **four** reframing strategies (`--max-optimization-iterations 4`) and independently keeps the **rubric-best** and **semantic-best** answers. The loop stops early once **both** tracks reach **≥ 75%** (semantic must be a real score, not garbage); without `--semantic`, rubric-only early exit uses the same **≥ 75%** rule. Results are written to `optimized_prompts_{model}_{timestamp}.json`.
 
 Each optimization iteration sends a **new reframed prompt** to the target model (fresh response, not a rewrite of the prior answer). The optimizer always anchors on the original benchmark question and the **baseline prompt/response** when generating each strategy variant. While the target model runs strategy *N*, the optimizer generates strategy *N+1* in parallel. When `--semantic` is active, each iteration scores rubric and semantic sequentially after the model returns, and prints both inline.
 
 ```bash
+# Local Ollama optimizer
 uv run run_benchmark.py run ollama -m "llama3.1:8b" \
-  --optimize-prompts \
+  --optimizer-provider ollama \
   --optimizer-model "llama3.3:70b"
+
+# DeepInfra optimizer
+export DEEPINFRA_TOKEN="your-token"
+uv run run_benchmark.py run ollama -m "llama3.1:8b" \
+  --optimizer-provider deepinfra \
+  --optimizer-model "deepseek-ai/DeepSeek-V3"
+
+# Config has optimizer settings, but skip optimization this run
+uv run run_benchmark.py run ollama -m "llama3.1:8b" --config config.yaml --no-optimize
 ```
+
+**Wrong model names:** Before the first question, the runner calls `list_models()` and aborts if the **target** model (`-m`) or **optimizer** model is not listed by the provider. In `interactive` mode, an invalid target model skips that model and continues; a missing optimizer model still aborts the whole run.
 
 Do not mix optimized scores with base model capability comparisons.
 

@@ -299,16 +299,16 @@ def test_semantic_scorer_caps_encoder_max_seq_length():
         dataset.questions,
         answers_file="answers_v2.txt",
         encoder=encoder,
-        max_seq_length=1536,
+        max_seq_length=2048,
     )
 
-    assert encoder.max_seq_length == 1536
-    assert scorer.max_seq_length == 1536
+    assert encoder.max_seq_length == 2048
+    assert scorer.max_seq_length == 2048
 
 
 def test_semantic_warm_encoder_is_idempotent():
     class RecordingEncoder:
-        max_seq_length = 1536
+        max_seq_length = 2048
         load_count = 0
 
         def __init__(self):
@@ -335,7 +335,7 @@ def test_semantic_cache_backfills_missing_reference_embeddings(tmp_path, monkeyp
     encoded_batches: list[list[str]] = []
 
     class FakeSentenceTransformer:
-        max_seq_length = 1536
+        max_seq_length = 2048
 
         def __init__(self, *args, **kwargs):
             pass
@@ -355,6 +355,9 @@ def test_semantic_cache_backfills_missing_reference_embeddings(tmp_path, monkeyp
     digest_payload = {
         "path": str(Path("answers_v2.txt")),
         "references": {str(k): references[k] for k in sorted(references)},
+        "max_seq_length": 2048,
+        "scorer_version": SemanticScorer.VERSION,
+        "provider": "local",
     }
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -366,6 +369,7 @@ def test_semantic_cache_backfills_missing_reference_embeddings(tmp_path, monkeyp
                 "model": "FakeModel",
                 "answers_file": "answers_v2.txt",
                 "scorer_version": SemanticScorer.VERSION,
+                "max_seq_length": 2048,
                 "embeddings": {"1": [1.0, 1.0]},
             }
         ),
@@ -394,7 +398,7 @@ def test_semantic_preload_warms_reference_cache(tmp_path, monkeypatch):
     encoded_batches: list[list[str]] = []
 
     class FakeSentenceTransformer:
-        max_seq_length = 1536
+        max_seq_length = 2048
 
         def __init__(self, *args, **kwargs):
             pass
@@ -440,7 +444,7 @@ def test_semantic_preload_reuses_verified_sibling_cache_after_one_answer_change(
     encoded_batches: list[list[str]] = []
 
     class FakeSentenceTransformer:
-        max_seq_length = 1536
+        max_seq_length = 2048
 
         def __init__(self, *args, **kwargs):
             pass
@@ -491,6 +495,8 @@ def test_semantic_preload_reuses_verified_sibling_cache_after_one_answer_change(
             {
                 "path": str(answers_v1),
                 "references": {str(k): references[k] for k in sorted(references)},
+                "max_seq_length": 2048,
+                "scorer_version": SemanticScorer.VERSION,
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -503,6 +509,7 @@ def test_semantic_preload_reuses_verified_sibling_cache_after_one_answer_change(
                 "model": "FakeModel",
                 "answers_file": str(answers_v1),
                 "scorer_version": SemanticScorer.VERSION,
+                "max_seq_length": 2048,
                 "corpus_digest": old_digest,
                 "reference_hashes": {
                     str(q_id): hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -543,7 +550,7 @@ def test_semantic_preload_full_reencodes_legacy_cache_without_hashes(
     encoded_batches: list[list[str]] = []
 
     class FakeSentenceTransformer:
-        max_seq_length = 1536
+        max_seq_length = 2048
 
         def __init__(self, *args, **kwargs):
             pass
@@ -693,8 +700,10 @@ def test_export_includes_v2_provenance_and_criteria_csv(tmp_path):
             "provider": "ollama",
             "endpoint": "http://localhost:11434",
             "config": None,
-            "optimize_prompts": False,
+            "no_optimize": False,
+            "optimizer_provider": None,
             "optimizer_model": None,
+            "optimizer_api_key": None,
             "optimizer_endpoint": None,
             "max_optimization_iterations": None,
             "api_key": "secret-value",

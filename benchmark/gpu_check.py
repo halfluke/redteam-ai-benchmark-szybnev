@@ -26,7 +26,7 @@ from models.ollama import OllamaClient
 
 
 class GpuCheckFailed(RuntimeError):
-    """Raised when Ollama reports the target model is not resident in GPU VRAM."""
+    """Raised when the GPU residency check fails or cannot be completed."""
 
 
 def _load_model(client: OllamaClient, *, timeout_s: int) -> None:
@@ -48,7 +48,7 @@ def _load_model(client: OllamaClient, *, timeout_s: int) -> None:
     client.timeout = timeout_s
     try:
         client._post_json_with_retries(
-            url=url, headers=client._get_headers(), payload=payload, retries=1
+            url=url, headers=client._get_headers(), payload=payload, retries=2
         )
     finally:
         client.timeout = original_timeout
@@ -86,27 +86,35 @@ def run_gpu_check(
     *,
     min_vram_fraction: float,
     timeout_s: int,
-) -> Optional[float]:
+) -> float:
     """Load the model, check VRAM residency, and raise if below threshold.
 
-    Returns the resident fraction (0.0-1.0) on success, or None if the check
-    could not be performed (non-Ollama client, or the probe/ps call itself
-    failed -- the latter is left for the main benchmark loop to surface
-    properly rather than treated as a GPU-check failure).
+    Returns the resident fraction (0.0-1.0) on success. When
+    ``min_vram_fraction > 0``, any probe failure aborts via ``GpuCheckFailed``.
     """
     if min_vram_fraction <= 0:
-        return None
+        return 0.0
+
     if not isinstance(client, OllamaClient):
-        return None
+        raise GpuCheckFailed(
+            "GPU check failed: provider is not Ollama, so /api/ps VRAM residency "
+            "cannot be measured. Disable gpu_check or use an Ollama target."
+        )
 
     try:
         _load_model(client, timeout_s=timeout_s)
-    except Exception:
-        return None
+    except Exception as e:
+        raise GpuCheckFailed(
+            f"GPU check failed: could not load the model within {timeout_s}s "
+            f"({e}). Aborting before the benchmark run."
+        ) from e
 
     residency = get_vram_residency(client, timeout_s=timeout_s)
     if residency is None:
-        return None
+        raise GpuCheckFailed(
+            "GPU check failed: Ollama /api/ps did not report VRAM residency for "
+            f"{client.model_name!r}. Aborting before the benchmark run."
+        )
     size, size_vram = residency
 
     fraction = size_vram / size

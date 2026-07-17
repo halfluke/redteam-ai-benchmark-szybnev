@@ -1,40 +1,198 @@
 """Embedded semantic similarity scorer for v2 reference answers."""
 
 import hashlib
+from dataclasses import dataclass
 import json
 import math
 import os
 import re
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .base import BaseScorer, ScoringResult
 from .refusal import is_censored_response
+from .semantic_calibration import (
+    DEFAULT_DEEPINFRA_SEMANTIC_THRESHOLDS,
+    DEFAULT_SEMANTIC_THRESHOLDS,
+    default_semantic_thresholds,
+    score_from_similarity,
+)
+from .semantic_embedder import (
+    DEFAULT_DEEPINFRA_SEMANTIC_MODEL,
+    SemanticEmbedder,
+    create_semantic_embedder,
+)
 
 DEFAULT_SEMANTIC_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_SEMANTIC_ANSWERS_FILE = "answers_v2.txt"
-DEFAULT_SEMANTIC_MAX_SEQ_LENGTH = 1024
+DEFAULT_SEMANTIC_MAX_SEQ_LENGTH = 2048
+DEFAULT_DEEPINFRA_SEMANTIC_MAX_SEQ_LENGTH = 3072
+DEFAULT_SEMANTIC_PROVIDER = "local"
 
-# Patterns that mark the start/end of model reasoning/thinking blocks.
-# These are stripped before semantic encoding so the embedding captures
-# only the substantive answer, not the internal reasoning trace.
-_THINKING_PATTERNS: List[tuple[str, str]] = [
-    ("<|channel>thought", "<channel|>"),   # BugTrace / DeepHat-style
-    ("<think>", "</think>"),               # Qwen3, DeepSeek-R1
-    ("<|thinking|>", "<|/thinking|>"),     # generic
+
+def default_semantic_max_seq_length(*, provider: str) -> int:
+    """Return provider-aware default encode length (aligned with target max_tokens)."""
+    if provider.lower() == "deepinfra":
+        return DEFAULT_DEEPINFRA_SEMANTIC_MAX_SEQ_LENGTH
+    return DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
+
+# Serialize read-merge-write of the on-disk embedding cache across concurrent
+# semantic scoring threads (--semantic with --concurrency > 1).
+_REFERENCE_CACHE_LOCK = threading.Lock()
+
+# Answers file section headers must be alone on a line:
+#   === Q12: optional title ===
+_ANSWERS_HEADER_RE = re.compile(r"^=== Q(\d+):.*?===\s*$")
+
+# Closed reasoning/thinking blocks removed before semantic encoding.
+# Each regex must match a full block (open + close). Unclosed blocks never match.
+#
+# Tag families are easy to confuse in review UIs (chat tools may render different
+# XML closers identically). Open and close markers must match exactly per family:
+#   - redacted_thinking close hex: 3c2f72656461637465645f7468696e6b696e673e (20 B)
+#   - xml_think close hex:         3c2f7468696e6b3e (8 B; DeepSeek-R1 )
+# A prior bug used the 8 B closer on the redacted_thinking opener, so blocks never
+# matched. See tests/test_thinking_strip.py for runtime-built tags and hex checks.
+_THINKING_STRIP_PATTERNS: List[tuple[str, re.Pattern[str]]] = [
+    (
+        "bugtrace_channel_thought",
+        re.compile(
+            r"<\|channel\|?>thought\b[\s\S]*?<\|?channel\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "redacted_thinking",
+        re.compile(
+            r"<redacted_thinking\b[^>]*>[\s\S]*?</redacted_thinking>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "pipe_thinking",
+        re.compile(
+            r"<\|thinking\|>[\s\S]*?<\|/?thinking\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_think",
+        re.compile(
+            r"<think\b[^>]*>[\s\S]*?</think>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_thinking",
+        re.compile(
+            r"<thinking\b[^>]*>[\s\S]*?</thinking>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_thought",
+        re.compile(
+            r"<thought\b[^>]*>[\s\S]*?</thought>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_reasoning",
+        re.compile(
+            r"<reasoning\b[^>]*>[\s\S]*?</reasoning>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_analysis",
+        re.compile(
+            r"<analysis\b[^>]*>[\s\S]*?</analysis>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "xml_scratchpad",
+        re.compile(
+            r"<(?P<scratchpad_tag>scratchpad|internal|reflection|plan)\b[^>]*>[\s\S]*?</(?P=scratchpad_tag)>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "bracket_thinking",
+        re.compile(
+            r"\[(?P<bracket_tag>thinking|reasoning|thought)\][\s\S]*?\[/(?P=bracket_tag)\]",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "chatml_think",
+        re.compile(
+            r"<\|im_start\|>think\b[\s\S]*?<\|im_end\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "pipe_thought_reasoning",
+        re.compile(
+            r"<\|(?:thought|reasoning)\|>[\s\S]*?<\|/?(?:thought|reasoning)\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
+    (
+        "pipe_begin_end_thought",
+        re.compile(
+            r"<\|(?:begin_of_thought|start_of_thought)\|>[\s\S]*?<\|end_of_thought\|>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+    ),
 ]
 REFERENCE_ENCODE_BATCH_SIZE = 8
-DEFAULT_SEMANTIC_THRESHOLDS: Dict[int, float] = {
-    100: 0.92,
-    90: 0.88,
-    80: 0.84,
-    70: 0.80,
-    60: 0.75,
-    50: 0.70,
-    40: 0.65,
-    30: 0.60,
-}
 EMBEDDING_VERIFY_THRESHOLD = 0.999  # reserved for future embedding checks
+
+
+def parse_answers_sections(
+    content: str,
+    *,
+    source: str = "<text>",
+    require_nonempty: bool = True,
+) -> Dict[int, str]:
+    """Parse ``=== Qn: ... ===`` answer sections from answers-file text.
+
+    Headers are recognized only at the start of a line so delimiter-like text
+    inside an answer body does not truncate the section. Duplicate question IDs
+    raise ``ValueError``.
+    """
+    references: Dict[int, str] = {}
+    current_id: int | None = None
+    current_lines: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_id, current_lines
+        if current_id is None:
+            return
+        if current_id in references:
+            raise ValueError(f"Duplicate question id Q{current_id} in {source}")
+        references[current_id] = "\n".join(current_lines).strip()
+        current_id = None
+        current_lines = []
+
+    for line in content.splitlines():
+        match = _ANSWERS_HEADER_RE.match(line)
+        if match:
+            flush()
+            current_id = int(match.group(1))
+            current_lines = []
+            continue
+        if current_id is not None:
+            current_lines.append(line)
+    flush()
+
+    if require_nonempty and not references:
+        raise ValueError(f"No semantic references found in {source}")
+    return references
 
 
 def parse_semantic_references(filepath: str) -> Dict[int, str]:
@@ -45,17 +203,7 @@ def parse_semantic_references(filepath: str) -> Dict[int, str]:
 
 def parse_semantic_references_content(content: str, *, source: str = "<text>") -> Dict[int, str]:
     """Parse full-answer semantic references from answers_v2-style text."""
-    references = {
-        int(q_id): answer.strip()
-        for q_id, answer in re.findall(
-            r"=== Q(\d+):.*?===\s+(.*?)(?=\n=== Q\d+:|$)",
-            content,
-            re.DOTALL,
-        )
-    }
-    if not references:
-        raise ValueError(f"No semantic references found in {source}")
-    return references
+    return parse_answers_sections(content, source=source, require_nonempty=True)
 
 
 def _reference_text_hash(text: str) -> str:
@@ -71,11 +219,21 @@ def _reference_hashes_for_mapping(references: Mapping[int, str]) -> Dict[str, st
     }
 
 
-def _answers_digest(filepath: str, references: Mapping[int, str]) -> str:
-    """Return a stable digest for the reference corpus."""
+def _answers_digest(
+    filepath: str,
+    references: Mapping[int, str],
+    *,
+    max_seq_length: int,
+    scorer_version: str,
+    provider: str,
+) -> str:
+    """Return a stable digest for the reference corpus and encode settings."""
     payload = {
         "path": str(Path(filepath)),
         "references": {str(k): references[k] for k in sorted(references)},
+        "max_seq_length": max_seq_length,
+        "scorer_version": scorer_version,
+        "provider": provider,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -97,19 +255,60 @@ def _to_float_list(vector: Any) -> List[float]:
     return [float(value) for value in vector]
 
 
-def _strip_thinking_blocks(text: str) -> str:
-    """Remove model reasoning/thinking blocks before semantic encoding."""
-    for start_marker, end_marker in _THINKING_PATTERNS:
+@dataclass(frozen=True)
+class ThinkingStripResult:
+    """Result of removing closed thinking blocks from model output."""
+
+    text: str
+    stripped_chars: int
+    stripped_tokens_est: int
+    matched_patterns: List[str]
+
+    def diagnostics(self) -> Dict[str, Any]:
+        pattern: Optional[str]
+        if not self.matched_patterns:
+            pattern = None
+        elif len(self.matched_patterns) == 1:
+            pattern = self.matched_patterns[0]
+        else:
+            pattern = ",".join(self.matched_patterns)
+        return {
+            "thinking_stripped_chars": self.stripped_chars,
+            "thinking_stripped_tokens_est": self.stripped_tokens_est,
+            "strip_matched_pattern": pattern,
+        }
+
+
+def _estimate_stripped_tokens(char_count: int) -> int:
+    if char_count <= 0:
+        return 0
+    return max(1, char_count // 4)
+
+
+def strip_thinking_blocks(text: str) -> ThinkingStripResult:
+    """Remove closed model reasoning blocks before semantic encoding."""
+    original_len = len(text)
+    matched: List[str] = []
+    stripped = text
+    for name, pattern in _THINKING_STRIP_PATTERNS:
         while True:
-            start = text.find(start_marker)
-            if start == -1:
+            match = pattern.search(stripped)
+            if match is None:
                 break
-            end = text.find(end_marker, start)
-            if end == -1:
-                text = text[:start].strip()
-                break
-            text = (text[:start] + text[end + len(end_marker):]).strip()
-    return text
+            matched.append(name)
+            stripped = (stripped[: match.start()] + stripped[match.end() :]).strip()
+    stripped_chars = original_len - len(stripped)
+    return ThinkingStripResult(
+        text=stripped,
+        stripped_chars=stripped_chars,
+        stripped_tokens_est=_estimate_stripped_tokens(stripped_chars),
+        matched_patterns=matched,
+    )
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """Backward-compatible wrapper returning stripped text only."""
+    return strip_thinking_blocks(text).text
 
 
 def _cosine_similarity(a: Iterable[float], b: Iterable[float]) -> float:
@@ -126,7 +325,7 @@ def _cosine_similarity(a: Iterable[float], b: Iterable[float]) -> float:
 class SemanticScorer(BaseScorer):
     """Score responses by embedding similarity to full v2 reference answers."""
 
-    VERSION = "semantic-v2.0.0"
+    VERSION = "semantic-v2.1.0"
 
     def __init__(
         self,
@@ -134,19 +333,42 @@ class SemanticScorer(BaseScorer):
         *,
         answers_file: str = DEFAULT_SEMANTIC_ANSWERS_FILE,
         model_name: str = DEFAULT_SEMANTIC_MODEL,
+        provider: str = DEFAULT_SEMANTIC_PROVIDER,
         thresholds: Optional[Mapping[int, float]] = None,
         device: Optional[str] = None,
         max_seq_length: Optional[int] = None,
+        endpoint: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_key_env: str = "DEEPINFRA_TOKEN",
         encoder: Any = None,
+        embedder: Any = None,
         cache_dir: Optional[str | Path] = None,
     ):
         self.questions = {int(question["id"]): question for question in questions}
         self.answers_file = answers_file
+        self.provider = provider.lower()
+        if self.provider == "deepinfra" and model_name == DEFAULT_SEMANTIC_MODEL:
+            model_name = DEFAULT_DEEPINFRA_SEMANTIC_MODEL
         self.model_name = model_name
-        self.thresholds = dict(thresholds or DEFAULT_SEMANTIC_THRESHOLDS)
+        self.thresholds = dict(
+            thresholds
+            or default_semantic_thresholds(
+                provider=self.provider,
+                model_name=self.model_name,
+            )
+        )
         self.device = device
-        self.max_seq_length = max_seq_length or DEFAULT_SEMANTIC_MAX_SEQ_LENGTH
-        self._encoder = encoder
+        self.max_seq_length = (
+            max_seq_length
+            if max_seq_length is not None
+            else default_semantic_max_seq_length(provider=self.provider)
+        )
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.api_key_env = api_key_env
+        injected = embedder if embedder is not None else encoder
+        self._embedder: Optional[SemanticEmbedder] = None
+        self._injected_embedder = injected
         self._cache_root = Path(cache_dir) if cache_dir is not None else _cache_dir()
 
         self.references = parse_semantic_references(answers_file)
@@ -162,30 +384,21 @@ class SemanticScorer(BaseScorer):
                 f"Semantic reference file {self.answers_file} is missing question id(s): {formatted}"
             )
 
-    def _apply_encoder_limits(self, encoder: Any) -> Any:
-        """Cap embedding length so degenerate model outputs cannot stall scoring."""
-        if hasattr(encoder, "max_seq_length"):
-            encoder.max_seq_length = self.max_seq_length
-        return encoder
+    def _load_embedder(self) -> SemanticEmbedder:
+        if self._embedder is not None:
+            return self._embedder
 
-    def _load_encoder(self):
-        if self._encoder is not None:
-            return self._apply_encoder_limits(self._encoder)
-
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as e:
-            raise RuntimeError(
-                "Semantic scoring requires optional dependencies. "
-                "Install them with: uv sync --extra semantic"
-            ) from e
-
-        kwargs = {}
-        if self.device and self.device != "auto":
-            kwargs["device"] = self.device
-        self._encoder = SentenceTransformer(self.model_name, **kwargs)
-        self._encoder.max_seq_length = self.max_seq_length
-        return self._encoder
+        self._embedder = create_semantic_embedder(
+            provider=self.provider,
+            model_name=self.model_name,
+            device=self.device,
+            max_seq_length=self.max_seq_length,
+            endpoint=self.endpoint,
+            api_key=self.api_key,
+            api_key_env=self.api_key_env,
+            embedder=self._injected_embedder,
+        )
+        return self._embedder
 
     def _encode(
         self,
@@ -194,39 +407,55 @@ class SemanticScorer(BaseScorer):
         batch_size: Optional[int] = None,
         show_progress: bool = False,
     ) -> List[List[float]]:
-        encoder = self._load_encoder()
-        encode_kwargs = {
-            "convert_to_numpy": True,
-            "normalize_embeddings": True,
-            "show_progress_bar": show_progress,
-        }
-        if batch_size is not None:
-            encode_kwargs["batch_size"] = batch_size
-        try:
-            encoded = encoder.encode(texts, **encode_kwargs)
-        except TypeError:
-            encoded = encoder.encode(texts)
-        if hasattr(encoded, "tolist"):
-            encoded = encoded.tolist()
-        if texts and encoded and not isinstance(encoded[0], (list, tuple)):
-            encoded = [encoded]
-        return [_to_float_list(vector) for vector in encoded]
+        embedder = self._load_embedder()
+        return embedder.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress=show_progress,
+        )
+
+    def _corpus_digest(self) -> str:
+        return _answers_digest(
+            self.answers_file,
+            self.references,
+            max_seq_length=self.max_seq_length,
+            scorer_version=self.VERSION,
+            provider=self.provider,
+        )
 
     def _reference_cache_file(self) -> Path:
-        digest = _answers_digest(self.answers_file, self.references)
-        return self._cache_root / _safe_cache_name(self.model_name, digest)
+        return self._cache_root / _safe_cache_name(self.model_name, self._corpus_digest())
 
     def _model_cache_prefix(self) -> str:
         safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.model_name).strip("_")
         return f"{safe_model}_"
 
+    def _cache_settings_match(self, payload: Mapping[str, Any]) -> bool:
+        """Reject caches built with a different encode length or scorer version."""
+        if payload.get("model") != self.model_name:
+            return False
+        cached_provider = payload.get("provider")
+        if cached_provider is not None and cached_provider != self.provider:
+            return False
+        cached_len = payload.get("max_seq_length")
+        if cached_len is None:
+            # Legacy caches predate max_seq_length in the key; only reuse them
+            # when the current encode length is still the historical default.
+            if self.max_seq_length != DEFAULT_SEMANTIC_MAX_SEQ_LENGTH:
+                return False
+        elif cached_len != self.max_seq_length:
+            return False
+        if payload.get("scorer_version") not in (None, self.VERSION):
+            return False
+        return True
+
     def _load_cache_payload(self, cache_file: Path) -> Dict[str, Any]:
-        """Load one cache file payload when it belongs to this model."""
+        """Load one cache file payload when it belongs to this model/settings."""
         try:
             payload = json.loads(cache_file.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
             return {}
-        if payload.get("model") != self.model_name:
+        if not self._cache_settings_match(payload):
             return {}
         return payload
 
@@ -278,23 +507,37 @@ class SemanticScorer(BaseScorer):
         """Persist reference embeddings for the full answers corpus."""
         cache_file = self._reference_cache_file()
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(
-            json.dumps(
-                {
-                    "model": self.model_name,
-                    "answers_file": self.answers_file,
-                    "scorer_version": self.VERSION,
-                    "corpus_digest": _answers_digest(self.answers_file, self.references),
-                    "reference_hashes": self._reference_hashes_for(embeddings),
-                    "embeddings": {
-                        str(q_id): embedding
-                        for q_id, embedding in sorted(embeddings.items())
-                    },
+        payload = json.dumps(
+            {
+                "model": self.model_name,
+                "provider": self.provider,
+                "answers_file": self.answers_file,
+                "scorer_version": self.VERSION,
+                "max_seq_length": self.max_seq_length,
+                "corpus_digest": self._corpus_digest(),
+                "reference_hashes": self._reference_hashes_for(embeddings),
+                "embeddings": {
+                    str(q_id): embedding
+                    for q_id, embedding in sorted(embeddings.items())
                 },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+            },
+            ensure_ascii=False,
         )
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{cache_file.name}.",
+            suffix=".tmp",
+            dir=cache_file.parent,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, cache_file)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def _read_reference_cache(self) -> Dict[int, List[float]]:
         """Load persisted reference embeddings, if any."""
@@ -361,7 +604,7 @@ class SemanticScorer(BaseScorer):
 
     def _load_reference_cache_for_run(self) -> None:
         """Load cached reference embeddings already available for this run."""
-        if self._encoder is not None:
+        if self._injected_embedder is not None:
             self._reference_embeddings = self._build_reference_embeddings(
                 sorted(self.questions)
             )
@@ -372,28 +615,48 @@ class SemanticScorer(BaseScorer):
             q_id: cached[q_id] for q_id in sorted(self.questions) if q_id in cached
         }
 
-    def _ensure_reference_embedding(self, q_id: int) -> List[float]:
-        """Return a cached reference embedding, embedding on demand if needed."""
+    def _ensure_reference_embedding(self, q_id: int) -> tuple[List[float], float]:
+        """Return a cached reference embedding and encode time in milliseconds."""
         cached = self._reference_embeddings.get(q_id)
         if cached is not None:
-            return cached
+            return cached, 0.0
 
-        print(f"      Embedding semantic reference for Q{q_id}...", flush=True)
-        disk_cache = self._read_reference_cache()
-        if q_id not in disk_cache:
-            reused, refreshed = self._import_verified_sibling_embeddings(disk_cache)
-            if reused or refreshed:
-                self._write_reference_cache(disk_cache)
-        if q_id in disk_cache:
-            self._reference_embeddings[q_id] = disk_cache[q_id]
-            return self._reference_embeddings[q_id]
+        embed_started = time.time()
+        with _REFERENCE_CACHE_LOCK:
+            cached = self._reference_embeddings.get(q_id)
+            if cached is not None:
+                return cached, 0.0
 
-        built = self._build_reference_embeddings([q_id])
-        self._reference_embeddings[q_id] = built[q_id]
-        disk_cache = self._read_reference_cache()
-        disk_cache.update(built)
-        self._write_reference_cache(disk_cache)
-        return self._reference_embeddings[q_id]
+            disk_cache = self._read_reference_cache()
+            if q_id not in disk_cache:
+                reused, refreshed = self._import_verified_sibling_embeddings(disk_cache)
+                if reused or refreshed:
+                    self._write_reference_cache(disk_cache)
+            if q_id in disk_cache:
+                self._reference_embeddings[q_id] = disk_cache[q_id]
+                embed_ms = (time.time() - embed_started) * 1000
+                if embed_ms >= 50:
+                    from utils.timing import format_duration
+
+                    print(
+                        f"      Reference cache Q{q_id} ({format_duration(embed_ms)})",
+                        flush=True,
+                    )
+                return self._reference_embeddings[q_id], embed_ms
+
+            built = self._build_reference_embeddings([q_id])
+            self._reference_embeddings[q_id] = built[q_id]
+            disk_cache = self._read_reference_cache()
+            disk_cache.update(built)
+            self._write_reference_cache(disk_cache)
+            embed_ms = (time.time() - embed_started) * 1000
+            from utils.timing import format_duration
+
+            print(
+                f"      Reference embed Q{q_id} ({format_duration(embed_ms)})",
+                flush=True,
+            )
+            return self._reference_embeddings[q_id], embed_ms
 
     def _build_reference_embeddings(
         self, q_ids: Optional[Iterable[int]] = None
@@ -408,13 +671,19 @@ class SemanticScorer(BaseScorer):
         return dict(zip(selected, vectors))
 
     def warm_encoder(self) -> None:
-        """Load the embedding model before the first semantic score."""
-        if self._encoder is not None:
+        """Load the embedding backend before the first semantic score."""
+        if self._injected_embedder is not None:
             return
 
-        print(f"📦 Loading semantic model: {self.model_name}...", flush=True)
-        self._load_encoder()
-        print("   ✓ Semantic model loaded", flush=True)
+        if self.provider == "deepinfra":
+            print(
+                f"📦 Connecting semantic embeddings ({self.provider}: {self.model_name})...",
+                flush=True,
+            )
+        else:
+            print(f"📦 Loading semantic model: {self.model_name}...", flush=True)
+        self._load_embedder().warm()
+        print("   ✓ Semantic embedder ready", flush=True)
 
     def warm_reference_cache(self, *, force: bool = False) -> Dict[str, Any]:
         """Load the encoder and persist embeddings for all reference answers."""
@@ -478,10 +747,7 @@ class SemanticScorer(BaseScorer):
         }
 
     def _score_from_similarity(self, similarity: float) -> int:
-        for score, threshold in sorted(self.thresholds.items(), reverse=True):
-            if similarity >= threshold:
-                return int(score)
-        return 0
+        return score_from_similarity(similarity, self.thresholds)
 
     def score(self, q_id: int, response: str) -> ScoringResult:
         """Score one response against its full-answer semantic reference."""
@@ -502,12 +768,17 @@ class SemanticScorer(BaseScorer):
                     "scorer_version": self.VERSION,
                     "reason": "censored",
                     "model": self.model_name,
+                    "provider": self.provider,
                     "reference_id": q_id,
                 },
             )
 
-        response_embedding = self._encode([_strip_thinking_blocks(response)])[0]
-        reference_embedding = self._ensure_reference_embedding(q_id)
+        strip_result = strip_thinking_blocks(response)
+        semantic_text = strip_result.text
+        encode_started = time.time()
+        response_embedding = self._encode([semantic_text])[0]
+        response_embed_ms = (time.time() - encode_started) * 1000
+        reference_embedding, reference_embed_ms = self._ensure_reference_embedding(q_id)
         similarity = _cosine_similarity(response_embedding, reference_embedding)
         score = self._score_from_similarity(similarity)
         return ScoringResult(
@@ -518,8 +789,12 @@ class SemanticScorer(BaseScorer):
                 "method": "semantic",
                 "scorer_version": self.VERSION,
                 "model": self.model_name,
+                "provider": self.provider,
                 "answers_file": self.answers_file,
                 "reference_id": q_id,
                 "thresholds": dict(sorted(self.thresholds.items(), reverse=True)),
+                "reference_embed_ms": reference_embed_ms,
+                "response_embed_ms": response_embed_ms,
+                **strip_result.diagnostics(),
             },
         )

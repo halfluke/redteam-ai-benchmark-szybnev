@@ -15,7 +15,7 @@ provider:
   name: lmstudio
   endpoint: https://YOUR-VLLM-SERVICE-HASH.a.run.app
   auth: cloudrun_identity
-  timeout: 600
+  timeout: 300
 
 scoring:
   method: rubric
@@ -44,6 +44,6 @@ export:
   include_response: true
 
 rate_limit_delay: 2.0
-max_tokens: 4096
+max_tokens: 3072
 temperature: 0.2
 concurrency: 1

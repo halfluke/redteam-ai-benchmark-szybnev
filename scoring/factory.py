@@ -48,18 +48,26 @@ def create_semantic_scorer(
     questions: List[Dict],
     answers_file: str,
     model_name: str,
+    provider: str = "local",
     thresholds: Optional[Dict[int, float]] = None,
     device: Optional[str] = None,
     max_seq_length: Optional[int] = None,
+    endpoint: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_key_env: str = "DEEPINFRA_TOKEN",
 ) -> ScorerBundle:
     """Create the optional parallel semantic scorer."""
     scorer = SemanticScorer(
         questions,
         answers_file=answers_file,
         model_name=model_name,
+        provider=provider,
         thresholds=thresholds,
         device=device,
         max_seq_length=max_seq_length,
+        endpoint=endpoint,
+        api_key=api_key,
+        api_key_env=api_key_env,
     )
     return ScorerBundle(
         method_label="semantic",

@@ -68,7 +68,7 @@ from scoring.semantic_scorer import (
 from scoring.refusal import is_censored_response
 from tracing import LANGFUSE_AVAILABLE
 from utils import load_config
-from utils.cloudrun_cost import estimate_cost, format_cost_estimate
+from utils.cloudrun_cost import CloudRunCostTracker
 from utils.config import (
     DEFAULT_QUESTIONS_FILE,
     DEFAULT_SCORER,
@@ -623,6 +623,7 @@ def _export_metadata(
     runtime: RuntimeOptions | None,
     scoring_method: str,
     extra_metadata: Dict | None = None,
+    cloudrun_cost: Dict | None = None,
 ) -> Dict:
     """Build top-level audit provenance for exported benchmark results."""
     dataset_metadata = dataset.metadata if dataset else {}
@@ -650,6 +651,8 @@ def _export_metadata(
     }
     if extra_metadata:
         metadata["metadata"] = extra_metadata
+    if cloudrun_cost:
+        metadata["cloudrun_cost"] = cloudrun_cost
     return metadata
 
 
@@ -666,6 +669,7 @@ def _export_benchmark_results(
     runtime: RuntimeOptions | None = None,
     summary: Dict | None = None,
     metadata: Dict | None = None,
+    cost_tracker: CloudRunCostTracker | None = None,
 ) -> Dict[str, str]:
     """Export benchmark results according to CLI and config options."""
     export_config = config.export if config else None
@@ -684,6 +688,9 @@ def _export_benchmark_results(
 
     exporter = BenchmarkExporter(output_dir=output_dir, model_name=model_name)
     exported = {}
+    cloudrun_cost_payload = None
+    if cost_tracker is not None:
+        cloudrun_cost_payload = cost_tracker.final_payload(completed=len(results))
 
     if "json" in formats:
         exported["json"] = exporter.export_json(
@@ -700,6 +707,7 @@ def _export_benchmark_results(
                 runtime=runtime,
                 scoring_method=scoring_method,
                 extra_metadata=metadata,
+                cloudrun_cost=cloudrun_cost_payload,
             ),
             filename=filename,
         )
@@ -1052,6 +1060,27 @@ def _print_final_report(results: List[Dict], total_score: float) -> None:
     )
 
 
+def _build_cloudrun_cost_tracker(
+    *,
+    config,
+    args,
+    runtime: RuntimeOptions,
+    session_started_at: float,
+    total_questions: int,
+) -> CloudRunCostTracker | None:
+    """Create a cost tracker when cloudrun_cost.enabled is set."""
+    if not config or not config.cloudrun_cost.enabled:
+        return None
+    return CloudRunCostTracker.from_config(
+        config.cloudrun_cost,
+        session_started_at=session_started_at,
+        total_questions=total_questions,
+        request_log=runtime.request_log,
+        max_cost_override=getattr(args, "max_cloudrun_cost", None),
+        progress_every_override=getattr(args, "cloudrun_cost_progress_every", None),
+    )
+
+
 def _run_model_with_export(
     *,
     questions,
@@ -1069,6 +1098,7 @@ def _run_model_with_export(
     dataset=None,
     shutdown_requested=None,
     keepalive=None,
+    cost_tracker=None,
 ):
     return run_single_model_benchmark(
         questions=questions,
@@ -1091,6 +1121,7 @@ def _run_model_with_export(
         },
         shutdown_requested=shutdown_requested,
         keepalive=keepalive,
+        cost_tracker=cost_tracker,
     )
 
 
@@ -1307,6 +1338,7 @@ def cmd_interactive(args):
         langfuse_config = _langfuse_config_or_none(config)
         all_results = []
         interrupted = False
+        cost_limit_exceeded = False
 
         try:
             with install_signal_handlers() as shutdown:
@@ -1361,6 +1393,13 @@ def cmd_interactive(args):
 
                         try:
                             keepalive = _create_keepalive(model_client, optimizer, config)
+                            cost_tracker = _build_cloudrun_cost_tracker(
+                                config=config,
+                                args=args,
+                                runtime=runtime,
+                                session_started_at=model_started_at,
+                                total_questions=len(questions),
+                            )
                             keepalive_ctx = keepalive if keepalive else nullcontext()
                             with keepalive_ctx:
                                 run_result = _run_model_with_export(
@@ -1383,20 +1422,22 @@ def cmd_interactive(args):
                                     dataset=dataset,
                                     shutdown_requested=shutdown.is_requested,
                                     keepalive=keepalive,
+                                    cost_tracker=cost_tracker,
                                 )
                             print(
                                 f"Finished {model_name}: {time.strftime('%Y-%m-%d %H:%M:%S')} "
                                 f"(total {_format_elapsed(time.time() - model_started_at)})"
                             )
-                            if config and config.cloudrun_cost.enabled:
-                                estimate = estimate_cost(
-                                    time.time() - model_started_at,
-                                    cpu=config.cloudrun_cost.cpu,
-                                    memory_gib=config.cloudrun_cost.memory_gib,
-                                    gpu_type=config.cloudrun_cost.gpu_type,
-                                    gpu_zonal_redundancy=config.cloudrun_cost.gpu_zonal_redundancy,
+                            if cost_tracker is not None:
+                                print(f"💰 {cost_tracker.format_final(completed=len(run_result.results))}")
+                            if getattr(run_result, "cost_limit_exceeded", False):
+                                print(
+                                    f"\n⚠️  Cloud Run cost cap reached for {model_name}; "
+                                    "partial results were saved when available."
                                 )
-                                print(f"💰 {format_cost_estimate(estimate)}")
+                                cost_limit_exceeded = True
+                                interrupted = True
+                                break
                         except RuntimeError as e:
                             print(f"   ❌ Error: {e}")
                             print(f"   Skipping remaining questions for {model_name}")
@@ -1433,6 +1474,8 @@ def cmd_interactive(args):
                         print(f"\n❌ No results for {model_name}\n")
 
                     if getattr(run_result, "interrupted", False):
+                        if getattr(run_result, "cost_limit_exceeded", False):
+                            cost_limit_exceeded = True
                         interrupted = True
                         break
         except GracefulShutdown:
@@ -1441,7 +1484,9 @@ def cmd_interactive(args):
             if optimizer:
                 optimizer.close()
 
-        if interrupted:
+        if cost_limit_exceeded:
+            print("\n⚠️  Cloud Run cost cap reached. Partial results were saved when available.")
+        elif interrupted:
             print("\n⚠️  Benchmark interrupted. Partial results were saved when available.")
 
         if all_results:
@@ -1480,6 +1525,8 @@ def cmd_interactive(args):
         else:
             print("\n❌ No successful tests completed")
 
+        if cost_limit_exceeded:
+            sys.exit(2)
         if interrupted:
             sys.exit(130)
 
@@ -1592,6 +1639,13 @@ def cmd_run_benchmark(args):
                         f"every {keepalive_cfg.interval_s:.0f}s on idle model)\n"
                     )
                 langfuse_config = _langfuse_config_or_none(config)
+                cost_tracker = _build_cloudrun_cost_tracker(
+                    config=config,
+                    args=args,
+                    runtime=runtime,
+                    session_started_at=run_started_at,
+                    total_questions=len(questions),
+                )
 
                 try:
                     keepalive_ctx = keepalive if keepalive else nullcontext()
@@ -1615,6 +1669,7 @@ def cmd_run_benchmark(args):
                             dataset=dataset,
                             shutdown_requested=shutdown.is_requested,
                             keepalive=keepalive,
+                            cost_tracker=cost_tracker,
                         )
                 except RuntimeError as e:
                     print(f"   ❌ Error: {e}")
@@ -1625,15 +1680,10 @@ def cmd_run_benchmark(args):
                     f"\n   Finished: {time.strftime('%Y-%m-%d %H:%M:%S')} "
                     f"(total {_format_elapsed(time.time() - run_started_at)})"
                 )
-                if config and config.cloudrun_cost.enabled:
-                    estimate = estimate_cost(
-                        time.time() - run_started_at,
-                        cpu=config.cloudrun_cost.cpu,
-                        memory_gib=config.cloudrun_cost.memory_gib,
-                        gpu_type=config.cloudrun_cost.gpu_type,
-                        gpu_zonal_redundancy=config.cloudrun_cost.gpu_zonal_redundancy,
+                if cost_tracker is not None:
+                    print(
+                        f"   💰 {cost_tracker.format_final(completed=len(run_result.results))}"
                     )
-                    print(f"   💰 {format_cost_estimate(estimate)}")
 
                 if run_result.optimization_results:
                     save_optimization_results(
@@ -1645,6 +1695,12 @@ def cmd_run_benchmark(args):
                 else:
                     print("\n⚠️  Benchmark interrupted before any question completed.")
 
+                if getattr(run_result, "cost_limit_exceeded", False):
+                    print(
+                        "\n⚠️  Cloud Run cost cap reached. "
+                        "Partial results were saved when available."
+                    )
+                    sys.exit(2)
                 if getattr(run_result, "interrupted", False):
                     print("\n⚠️  Benchmark interrupted. Partial results were saved when available.")
                     sys.exit(130)
@@ -1750,6 +1806,25 @@ def _add_runtime_args(parser):
             "less than this fraction (0-1) of the model resident in GPU VRAM "
             "(catches silent CPU fallback). 0 disables the check. "
             "Default: config or disabled."
+        ),
+    )
+    parser.add_argument(
+        "--max-cloudrun-cost",
+        type=float,
+        default=None,
+        help=(
+            "Abort the run when estimated Cloud Run spend in the configured "
+            "display currency (default GBP) reaches this value "
+            "(overrides cloudrun_cost.max_cost). Example: --max-cloudrun-cost 3"
+        ),
+    )
+    parser.add_argument(
+        "--cloudrun-cost-progress-every",
+        type=int,
+        default=None,
+        help=(
+            "Print mid-run Cloud Run cost spent/projected every N questions "
+            "(overrides cloudrun_cost.progress_every; 0 disables)"
         ),
     )
 

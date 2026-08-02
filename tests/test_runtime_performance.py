@@ -928,6 +928,117 @@ def test_cloudrun_cost_unknown_gpu_type_raises():
         estimate_cost(10, cpu=1, memory_gib=1, gpu_type="nvidia-h100")
 
 
+def test_cloudrun_cost_to_display_uses_usd_per_unit():
+    from utils.cloudrun_cost import to_display
+
+    assert to_display(1.33, 1.33) == pytest.approx(1.0)
+    assert to_display(2.66, 1.33) == pytest.approx(2.0)
+
+
+def test_cloudrun_cost_tracker_projection_and_payload_shape():
+    from utils.cloudrun_cost import (
+        PRICING_URL,
+        RATES_AS_OF,
+        CloudRunCostTracker,
+        estimate_cost,
+    )
+
+    started = 1_700_000_000.0
+    tracker = CloudRunCostTracker(
+        cpu=8,
+        memory_gib=32,
+        gpu_type="nvidia-l4",
+        gpu_zonal_redundancy=False,
+        currency="GBP",
+        usd_per_unit=1.33,
+        progress_every=5,
+        session_started_at=started,
+        warmup_seconds=120,
+        total_questions=60,
+    )
+    now = started + 1800
+    snap = tracker.snapshot(completed=10, now=now)
+
+    assert snap["elapsed_seconds"] == pytest.approx(1800)
+    assert snap["warmup_seconds"] == pytest.approx(120)
+    assert snap["benchmark_seconds"] == pytest.approx(1680)
+    assert snap["currency"] == "GBP"
+    assert snap["usd_per_unit"] == pytest.approx(1.33)
+    assert snap["rates_as_of"] == RATES_AS_OF
+    assert snap["pricing_url"] == PRICING_URL
+    assert "cpu" in snap["usd"] and "total" in snap["usd"]
+    assert snap["display_total"] == pytest.approx(snap["usd"]["total"] / 1.33)
+
+    expected_projected = estimate_cost(
+        1800 / 10 * 60,
+        cpu=8,
+        memory_gib=32,
+        gpu_type="nvidia-l4",
+        gpu_zonal_redundancy=False,
+    )
+    assert snap["projected_elapsed_seconds"] == pytest.approx(10800)
+    assert snap["projected_usd"] == pytest.approx(expected_projected.total_cost)
+    assert snap["projected_display"] == pytest.approx(expected_projected.total_cost / 1.33)
+
+
+def test_cloudrun_cost_tracker_max_cost_raises():
+    from utils.cloudrun_cost import CloudRunCostLimitExceeded, CloudRunCostTracker
+
+    started = 1_700_000_000.0
+    tracker = CloudRunCostTracker(
+        cpu=8,
+        memory_gib=32,
+        gpu_type="nvidia-l4",
+        gpu_zonal_redundancy=False,
+        currency="GBP",
+        usd_per_unit=1.33,
+        max_cost=0.01,
+        session_started_at=started,
+        total_questions=60,
+    )
+    with pytest.raises(CloudRunCostLimitExceeded, match="cap"):
+        tracker.check_limit(now=started + 3600)
+    assert tracker.cost_limit_exceeded is True
+
+
+def test_cloudrun_cost_format_includes_display_currency():
+    from utils.cloudrun_cost import estimate_cost, format_cost_estimate
+
+    estimate = estimate_cost(
+        3600,
+        cpu=8,
+        memory_gib=32,
+        gpu_type="nvidia-l4",
+        gpu_zonal_redundancy=False,
+    )
+    text = format_cost_estimate(estimate, currency="GBP", usd_per_unit=1.33, warmup_seconds=90)
+    assert "~$" in text
+    assert "£" in text
+    assert "warmup 90s included" in text
+    assert "cloud.google.com/run/pricing" in text
+
+
+def test_cloudrun_cost_resolve_session_and_warmup(tmp_path, monkeypatch):
+    from utils.cloudrun_cost import (
+        resolve_session_started_at,
+        resolve_warmup_seconds,
+    )
+
+    monkeypatch.delenv("CLOUDRUN_COST_SESSION_START", raising=False)
+    monkeypatch.delenv("CLOUDRUN_COST_WARMUP_SECONDS", raising=False)
+    assert resolve_session_started_at(42.0) == 42.0
+
+    monkeypatch.setenv("CLOUDRUN_COST_SESSION_START", "100.5")
+    assert resolve_session_started_at(42.0) == pytest.approx(100.5)
+
+    env_file = tmp_path / "cloudrun_cost_warmup.env"
+    env_file.write_text("CLOUDRUN_COST_WARMUP_SECONDS=77\n", encoding="utf-8")
+    assert resolve_warmup_seconds(env_file=env_file) == pytest.approx(77.0)
+
+    monkeypatch.setenv("CLOUDRUN_COST_WARMUP_SECONDS", "12")
+    assert resolve_warmup_seconds(env_file=env_file) == pytest.approx(12.0)
+
+
 def test_config_loads_cloudrun_cost_section(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -940,6 +1051,10 @@ cloudrun_cost:
   gpu_zonal_redundancy: false
   cpu: 8
   memory_gib: 32
+  currency: GBP
+  usd_per_unit: 1.33
+  progress_every: 5
+  max_cost: 3
 """,
         encoding="utf-8",
     )
@@ -950,6 +1065,10 @@ cloudrun_cost:
     assert config.cloudrun_cost.gpu_type == "nvidia-l4"
     assert config.cloudrun_cost.cpu == 8
     assert config.cloudrun_cost.memory_gib == 32
+    assert config.cloudrun_cost.currency == "GBP"
+    assert config.cloudrun_cost.usd_per_unit == pytest.approx(1.33)
+    assert config.cloudrun_cost.progress_every == 5
+    assert config.cloudrun_cost.max_cost == pytest.approx(3.0)
 
 
 def test_config_cloudrun_cost_defaults_disabled(tmp_path):
@@ -959,6 +1078,9 @@ def test_config_cloudrun_cost_defaults_disabled(tmp_path):
     config = run_benchmark.load_config(str(config_path))
 
     assert config.cloudrun_cost.enabled is False
+    assert config.cloudrun_cost.currency == "GBP"
+    assert config.cloudrun_cost.progress_every == 5
+    assert config.cloudrun_cost.max_cost is None
 
 
 def test_config_rejects_unknown_cloudrun_gpu_type(tmp_path):
@@ -975,6 +1097,23 @@ cloudrun_cost:
     )
 
     with pytest.raises(ValueError, match="Unknown Cloud Run GPU type"):
+        run_benchmark.load_config(str(config_path))
+
+
+def test_config_rejects_invalid_cloudrun_cost_fx(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+provider:
+  name: ollama
+cloudrun_cost:
+  enabled: false
+  usd_per_unit: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="usd_per_unit"):
         run_benchmark.load_config(str(config_path))
 
 

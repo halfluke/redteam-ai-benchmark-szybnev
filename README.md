@@ -33,7 +33,7 @@ This branch extends upstream `v2` with Cloud Run authentication, background keep
 | Per-question timestamp/duration/prompt + run start/finish | ✅ General | Each question's console line is prefixed with a clock timestamp (for correlating with Cloud Run logs), followed by a snippet of the original question prompt (previously only the optimizer's reframed prompt was ever shown, never the baseline question being asked), and the score line now shows how long that question took. The run prints `Started:`/`Finished:` (with total elapsed) once per model. |
 | Score rationale (`Why: ...`) | ✅ General | When the rubric scorer (v2) is active, a `Why:` line is printed under each score explaining the deterministic cause: `N/M criteria passed: <ids> \| missing: <ids>` for a partial/normal score, `refused (censored)` for a refusal, or `fatal_error: <id>` when a `fatal_errors` pattern matched. Printed for the baseline answer, the post-optimization answer, and in the concurrent runner. Silently omitted for non-rubric scorers (e.g. plain keyword scorer), which have no per-criterion breakdown. |
 | Fix: optimizer discarding real 0%-scored responses | ✅ General | `PromptOptimizer.optimize_prompt()` tracked the best attempt using a `best_score = 0` sentinel with a strict `score > best_score` comparison, so when the original prompt *and every optimization attempt* for a question scored exactly `0%`, the initial `best_response = ""` placeholder was never overwritten — the real (if keyword-mismatched) model output was silently discarded and the exported result showed an empty `full_response` at a genuine (non-empty) latency. Fixed by using a `-1` sentinel so the first attempt's response is always captured regardless of score. |
-| Estimated Cloud Run cost (`cloudrun_cost:` in YAML) | ☁️ Cloud Run | Optional, disabled by default. Prints one estimated cost line at the end of a run (or once per model in `interactive` mode), computed from published on-demand instance-based-billing rates (CPU/memory/GPU per second, see `utils/cloudrun_cost.py`) times observed instance uptime. This is an estimate, not the authoritative GCP invoice — real billing data lags actual usage by ~24h with no real-time API. See `docs/agent-reference.md` for details and caveats. |
+| Estimated Cloud Run cost (`cloudrun_cost:` in YAML) | ☁️ Cloud Run | Optional, disabled by default. Estimates spend from published on-demand instance-based rates × session uptime (includes warmup when `run_*_baseline.sh` sets `CLOUDRUN_COST_SESSION_START`). Prints USD + display currency (default GBP), mid-run spent/projected every N questions, persists a `cloudrun_cost` block in result JSON and a `cost_summary` request-log row, and can abort via `--max-cloudrun-cost` / `max_cost` (display-currency units). Not the GCP invoice — see `docs/agent-reference.md`. |
 | Pre-flight GPU residency check (`gpu_check:` in YAML / `--min-vram-fraction`) | ☁️ Cloud Run | Optional, disabled by default. Before the paid benchmark starts, loads the model and asks Ollama's own `/api/ps` how much of it (`size_vram` vs `size`) is actually resident in GPU VRAM, aborting if it's below a configured fraction — catches silent CPU fallback on a broken/misconfigured Ollama GPU backend before it wastes a full run's worth of Cloud Run GPU billing and wall-clock time (this happened in practice: see [`ollama/ollama#16449`](https://github.com/ollama/ollama/issues/16449) and the `v0.24.0` pin in `GCP-CLOUDRUN-AImodels/README.md`). Uses Ollama's own accounting rather than an inferred speed heuristic, so it needs no per-model calibration. Only measurable for Ollama clients; skipped for other providers. Applies to the target model only — never the optimizer, which commonly runs on a separate, often local, non-Cloud-Run endpoint. See `configs/cloudrun_ollama.yaml` / `configs/cloudrun_ollama_bugtrace.yaml`. |
 | Provider-agnostic optimizer (`--optimizer-provider`) | ✅ General | Optimizer LLM can be Ollama, LM Studio, OpenWebUI, OpenRouter, or DeepInfra. `--optimizer-provider` and `--optimizer-model` are an atomic pair (both required to enable optimization, or neither). Cloud providers fail fast at init if no API key is set. |
 
@@ -56,9 +56,15 @@ To avoid paying for a full run that's silently stuck on CPU, add `gpu_check: ena
 BugTrace Apex 26B Q4 (Ollama on Cloud Run, `max_tokens=3072`):
 
 ```bash
-source scripts/local_env.sh          # optional: set BUGTRACE_ENDPOINT / BUGTRACE_MODEL
-./scripts/run_bugtrace_baseline.sh
+./scripts/run_bugtrace_baseline.sh   # auto-sources scripts/local_env.sh when present
+# Optional cost cap (~£3 display currency; see cloudrun_cost.currency / usd_per_unit):
+# uv run run_benchmark.py run ollama -m "$BUGTRACE_MODEL" -e "$BUGTRACE_ENDPOINT" \
+#   --config configs/cloudrun_ollama_bugtrace.yaml --max-cloudrun-cost 3
 ```
+
+Services use `min-instances=0` (scale to zero when idle). The `run_*_baseline.sh`
+wrappers warm up automatically; use `./scripts/warmup_bugtrace.sh` alone only when
+you want a standalone cold-start ping.
 
 ---
 

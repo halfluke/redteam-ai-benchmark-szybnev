@@ -33,7 +33,7 @@ Red Team AI Benchmark — CLI-бенчмарк для выбора base LLM по
 | Timestamp/duration/prompt по вопросу + start/finish run | ✅ General | Строка вопроса с clock timestamp (корреляция с Cloud Run logs), snippet исходного prompt (раньше показывался только reframed prompt optimizer), duration в строке score. Run печатает `Started:`/`Finished:` с общим elapsed на модель. |
 | Score rationale (`Why: ...`) | ✅ General | При rubric scorer (v2) под score — `Why:` с deterministic причиной: `N/M criteria passed` / `missing`, `refused (censored)` или `fatal_error: <id>`. Для baseline, post-optimization и concurrent runner. Без rubric breakdown — строка не печатается. |
 | Fix: optimizer отбрасывал real 0% responses | ✅ General | `best_score = 0` и `score > best_score` не перезаписывали placeholder при всех попытках на 0% — `full_response` мог быть пустым при ненулевой latency. Исправлено sentinel `-1`, первый ответ всегда сохраняется. |
-| Оценка стоимости Cloud Run (`cloudrun_cost:` в YAML) | ☁️ Cloud Run | Опционально, по умолчанию выкл. Одна строка estimated cost в конце run (или на модель в `interactive`), по published on-demand rates (CPU/memory/GPU per second, см. `utils/cloudrun_cost.py`) × observed uptime. Оценка, не GCP invoice — см. `docs/agent-reference.md`. |
+| Оценка стоимости Cloud Run (`cloudrun_cost:` в YAML) | ☁️ Cloud Run | Опционально, по умолчанию выкл. Оценка по published on-demand rates × session uptime (включая warmup, если `run_*_baseline.sh` задаёт `CLOUDRUN_COST_SESSION_START`). Печатает USD + display currency (по умолчанию GBP), mid-run spent/projected каждые N вопросов, пишет блок `cloudrun_cost` в result JSON и строку `cost_summary` в request-log; abort через `--max-cloudrun-cost` / `max_cost` (в единицах display currency). Не GCP invoice — см. `docs/agent-reference.md`. |
 | Pre-flight GPU check (`gpu_check:` / `--min-vram-fraction`) | ☁️ Cloud Run | Опционально, по умолчанию выкл. Перед платным benchmark — загрузка модели и `/api/ps` Ollama: доля `size_vram` vs `size` в GPU VRAM; abort ниже порога — ловит silent CPU fallback до полного run (см. [`ollama/ollama#16449`](https://github.com/ollama/ollama/issues/16449)). Только target model, не optimizer. См. `configs/cloudrun_ollama.yaml` / `configs/cloudrun_ollama_bugtrace.yaml`. |
 | Provider-agnostic optimizer (`--optimizer-provider`) | ✅ General | Optimizer: Ollama, LM Studio, OpenWebUI, OpenRouter или DeepInfra. `--optimizer-provider` и `--optimizer-model` — атомарная пара. Cloud providers fail fast без API key. |
 
@@ -56,9 +56,14 @@ uv run run_benchmark.py run lmstudio \
 BugTrace Apex 26B Q4 (Ollama на Cloud Run, `max_tokens=3072`):
 
 ```bash
-source scripts/local_env.sh          # опционально: BUGTRACE_ENDPOINT / BUGTRACE_MODEL
-./scripts/run_bugtrace_baseline.sh
+./scripts/run_bugtrace_baseline.sh   # auto-source scripts/local_env.sh, если файл есть
+# Опциональный лимит (~£3 display currency; см. cloudrun_cost.currency / usd_per_unit):
+# uv run run_benchmark.py run ollama -m "$BUGTRACE_MODEL" -e "$BUGTRACE_ENDPOINT" \
+#   --config configs/cloudrun_ollama_bugtrace.yaml --max-cloudrun-cost 3
 ```
+
+Сервисы с `min-instances=0` (scale to zero в idle). Обёртки `run_*_baseline.sh`
+сами делают warmup; `./scripts/warmup_bugtrace.sh` — только для отдельного cold-start ping.
 
 ---
 

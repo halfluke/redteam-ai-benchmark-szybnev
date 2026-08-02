@@ -513,6 +513,7 @@ def _run_questions_sequential(
     semantic_scorer=None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
     keepalive=None,
+    cost_tracker=None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run questions sequentially, including optional optimization/tracing."""
     results = []
@@ -968,6 +969,15 @@ def _run_questions_sequential(
                 semantic_best=semantic_best_block,
             )
         )
+        if cost_tracker is not None:
+            from utils.cloudrun_cost import CloudRunCostLimitExceeded  # noqa: PLC0415
+
+            cost_tracker.maybe_report(len(results))
+            try:
+                cost_tracker.check_limit()
+            except CloudRunCostLimitExceeded as exc:
+                print(f"  ⚠️  {exc}")
+                break
         try:
             _sleep_between_requests(runtime.rate_limit_delay, shutdown_requested)
         except GracefulShutdown:

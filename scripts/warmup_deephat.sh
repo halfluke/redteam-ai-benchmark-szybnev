@@ -3,13 +3,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/cloudrun_env.sh
-source "$ROOT/scripts/cloudrun_env.sh"
-# shellcheck source=scripts/lib_common.sh
+# shellcheck source=lib_common.sh
 source "$ROOT/scripts/lib_common.sh"
+source_local_env_if_present "$ROOT"
+# shellcheck source=cloudrun_env.sh
+source "$ROOT/scripts/cloudrun_env.sh"
 
 require_cmd curl python3 gcloud
 check_gcloud_login
+require_non_placeholder_endpoint "DeepHat" "$DEEPHAT_ENDPOINT"
 
 # vLLM cold starts are slower than Ollama's: loading safetensors weights plus
 # torch.compile + CUDA graph capture routinely takes 120-150s on an L4 before
@@ -23,6 +25,8 @@ timeout_s="$PING_TIMEOUT_S"
 if (( timeout_s < VLLM_MIN_PING_TIMEOUT_S )); then
   timeout_s="$VLLM_MIN_PING_TIMEOUT_S"
 fi
+
+WARMUP_STARTED_AT="$(date +%s)"
 
 echo "== Warmup: DeepHat (Cloud Run) =="
 echo "   endpoint: $DEEPHAT_ENDPOINT"
@@ -42,10 +46,11 @@ import json, sys
 data = json.loads(sys.argv[1])
 choices = data.get("choices") or []
 if choices:
-    msg = (choices[0].get("message") or {}).get("content", "")
+    msg = (choices[0].get("message") or {}).get("content") or ""
     preview = msg.strip().replace("\n", " ")[:80]
     if preview:
         print(f"   reply: {preview}")
 PY
 
+write_cloudrun_cost_warmup_seconds "$ROOT" "$(( $(date +%s) - WARMUP_STARTED_AT ))"
 echo "OK — DeepHat warm."

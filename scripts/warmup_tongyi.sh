@@ -3,13 +3,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/cloudrun_env.sh
-source "$ROOT/scripts/cloudrun_env.sh"
-# shellcheck source=scripts/lib_common.sh
+# shellcheck source=lib_common.sh
 source "$ROOT/scripts/lib_common.sh"
+source_local_env_if_present "$ROOT"
+# shellcheck source=cloudrun_env.sh
+source "$ROOT/scripts/cloudrun_env.sh"
 
 require_cmd curl python3 gcloud
 check_gcloud_login
+require_non_placeholder_endpoint "Tongyi" "$TONGYI_ENDPOINT"
+
+WARMUP_STARTED_AT="$(date +%s)"
 
 echo "== Warmup: Tongyi (Cloud Run) =="
 echo "   endpoint: $TONGYI_ENDPOINT"
@@ -33,4 +37,5 @@ if msg:
     print(f"   reply: {preview}")
 PY
 
+write_cloudrun_cost_warmup_seconds "$ROOT" "$(( $(date +%s) - WARMUP_STARTED_AT ))"
 echo "OK — Tongyi warm."

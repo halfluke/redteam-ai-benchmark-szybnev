@@ -1,0 +1,3 @@
+# Project shellcheck defaults
+external-sources=true
+source-path=SCRIPTDIR

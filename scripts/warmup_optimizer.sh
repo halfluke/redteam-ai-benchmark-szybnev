@@ -3,14 +3,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/cloudrun_env.sh
-source "$ROOT/scripts/cloudrun_env.sh"
-# shellcheck source=scripts/optimizer_env.sh
-source "$ROOT/scripts/optimizer_env.sh"
-# shellcheck source=scripts/lib_common.sh
+# shellcheck source=lib_common.sh
 source "$ROOT/scripts/lib_common.sh"
+source_local_env_if_present "$ROOT"
+# shellcheck source=cloudrun_env.sh
+source "$ROOT/scripts/cloudrun_env.sh"
+# shellcheck source=optimizer_env.sh
+source "$ROOT/scripts/optimizer_env.sh"
 
 require_cmd curl python3
+require_non_placeholder_endpoint "Optimizer" "$OPTIMIZER_ENDPOINT"
 
 echo "== Warmup: local optimizer (Ollama) =="
 echo "   endpoint:   $OPTIMIZER_ENDPOINT"

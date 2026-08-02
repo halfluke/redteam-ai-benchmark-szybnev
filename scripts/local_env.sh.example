@@ -2,23 +2,30 @@
 # local_env.sh is gitignored and never committed.
 #
 # Usage:
-#   source scripts/local_env.sh
-#   ./scripts/run_tongyi_baseline.sh
+#   ./scripts/run_bugtrace_baseline.sh   # auto-sources this file when present
+#   # or: source scripts/local_env.sh
 #
 # All variables are optional — unset variables fall back to the placeholders
 # in cloudrun_env.sh and optimizer_env.sh.
 
+# Cloud Run project / region (optional; region can also be parsed from URLs)
+# export CLOUDRUN_PROJECT="your-gcp-project"
+# export CLOUDRUN_REGION="europe-west1"
+
 # Cloud Run — Ollama target (Tongyi or equivalent)
 export TONGYI_ENDPOINT="https://YOUR-OLLAMA-SERVICE-HASH.a.run.app"
 export TONGYI_MODEL="your-ollama-model-id"
+# export TONGYI_SERVICE="tongyi-deepresearch-iq2s"   # optional if URL parses cleanly
 
 # Cloud Run — vLLM target (DeepHat or equivalent)
 export DEEPHAT_ENDPOINT="https://YOUR-VLLM-SERVICE-HASH.a.run.app"
 export DEEPHAT_MODEL="YourOrg/YourModel"
+# export DEEPHAT_SERVICE="deephat-vllm-7b-prebaked"
 
 # Cloud Run — Ollama target (BugTrace Apex 26B Q4)
 export BUGTRACE_ENDPOINT="https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app"
 export BUGTRACE_MODEL="hf.co/BugTraceAI/BugTraceAI-Apex-G4-26B-Q4:latest"
+# export BUGTRACE_SERVICE="bugtrace-apex-26b"
 
 # Local Ollama optimizer (LAN host running qwen2.5:7b or similar)
 export OPTIMIZER_ENDPOINT="http://OPTIMIZER-LAN-IP:11434"

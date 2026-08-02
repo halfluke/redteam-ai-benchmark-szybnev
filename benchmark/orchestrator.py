@@ -32,6 +32,7 @@ class SingleModelBenchmarkResult:
     exported: Dict[str, str] = field(default_factory=dict)
     tracer_failed: bool = False
     interrupted: bool = False
+    cost_limit_exceeded: bool = False
 
 
 def run_single_model_benchmark(
@@ -50,6 +51,7 @@ def run_single_model_benchmark(
     export_kwargs: Optional[Dict[str, Any]] = None,
     shutdown_requested: Optional[Callable[[], bool]] = None,
     keepalive=None,
+    cost_tracker=None,
 ) -> SingleModelBenchmarkResult:
     """Run, score, trace, and optionally export one model benchmark."""
     scorer_func = scorer_bundle.score_func
@@ -74,6 +76,9 @@ def run_single_model_benchmark(
         tracer_enabled=tracer is not None,
     )
     runtime.concurrency = effective_concurrency
+
+    if cost_tracker is not None and getattr(cost_tracker, "total_questions", 0) <= 0:
+        cost_tracker.total_questions = len(questions)
 
     if effective_concurrency > 1:
         results = _run_questions_concurrent(
@@ -103,9 +108,13 @@ def run_single_model_benchmark(
             semantic_scorer=semantic_scorer,
             shutdown_requested=shutdown_requested,
             keepalive=keepalive,
+            cost_tracker=cost_tracker,
         )
 
-    interrupted = shutdown_requested()
+    cost_limit_exceeded = bool(
+        cost_tracker and getattr(cost_tracker, "cost_limit_exceeded", False)
+    )
+    interrupted = shutdown_requested() or cost_limit_exceeded
     total_score = weighted_score(results) if results else 0.0
     interpretation = get_interpretation(total_score)
     summary = summarize_results(results)
@@ -132,6 +141,9 @@ def run_single_model_benchmark(
     if tracer:
         tracer.end_benchmark(total_score, interpretation)
 
+    if cost_tracker is not None:
+        cost_tracker.write_request_log(completed=len(results))
+
     exported = {}
     if export_callback and results:
         metadata = {}
@@ -141,6 +153,10 @@ def run_single_model_benchmark(
                 "completed_questions": len(results),
                 "total_questions": len(questions),
             }
+            if cost_limit_exceeded:
+                metadata["cost_limit_exceeded"] = True
+        export_kwargs = dict(export_kwargs or {})
+        export_kwargs["cost_tracker"] = cost_tracker
         exported = export_callback(
             results=results,
             model_name=model_name,
@@ -149,7 +165,7 @@ def run_single_model_benchmark(
             scoring_method=scoring_method,
             summary=summary,
             metadata=metadata or None,
-            **(export_kwargs or {}),
+            **export_kwargs,
         )
 
     return SingleModelBenchmarkResult(
@@ -161,4 +177,5 @@ def run_single_model_benchmark(
         exported=exported,
         tracer_failed=tracer_failed,
         interrupted=interrupted,
+        cost_limit_exceeded=cost_limit_exceeded,
     )

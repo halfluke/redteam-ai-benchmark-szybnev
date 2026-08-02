@@ -201,14 +201,20 @@ Ollama supports optional reverse-proxy Bearer auth through `--api-key`, config, 
 
 ### Cloud Run cost estimate (`utils/cloudrun_cost.py`)
 
-Optional, config-driven (`cloudrun_cost:` in YAML), disabled by default. When enabled, prints one estimated cost line at the end of a run (or once per model in `interactive` mode).
+Optional, config-driven (`cloudrun_cost:` in YAML), disabled by default. When enabled:
+
+- Prints USD **and** a display currency (default `currency: GBP`, `usd_per_unit: 1.33` = approximate USD per £1; no live FX API) at end of run / per model in `interactive`.
+- Prints mid-run spent + linear full-run projection every `progress_every` questions (default 5; `0` disables). CLI: `--cloudrun-cost-progress-every`.
+- Persists a top-level `cloudrun_cost` object in result JSON and appends a `phase: cost_summary` row to the request log when configured.
+- Optional abort when display-currency spend reaches `max_cost` / `--max-cloudrun-cost` (exit code `2`); partial results are still exported when available.
 
 This is an estimate, not the authoritative GCP invoice:
 
 - Real Cloud Billing data (BigQuery export, Cost Management UI) lags actual usage by roughly 24 hours and has no real-time API, so a genuine live cost query is not possible during a run.
-- Instead, the estimate multiplies observed wall-clock instance uptime (from just before the initial connectivity probe through to run completion) by published on-demand, Tier-1-region, instance-based-billing rates for CPU (`$/vCPU-second`), memory (`$/GiB-second`), and GPU (`$/second`).
+- The estimate multiplies observed wall-clock **session** uptime by published on-demand, Tier-1-region, instance-based-billing rates for CPU (`$/vCPU-second`), memory (`$/GiB-second`), and GPU (`$/second`).
+- Session start defaults to Python `run_started_at` / `model_started_at`. Wrapper scripts (`scripts/run_*_baseline.sh`) set `CLOUDRUN_COST_SESSION_START` before warmup; `warmup_*.sh` write `CLOUDRUN_COST_WARMUP_SECONDS` to `.cache/redteam/cloudrun_cost_warmup.env` so warmup wall time is included in the billed elapsed window.
 - This mirrors Cloud Run's actual billing model for GPU-attached services, which must use instance-based billing: the full CPU/memory/GPU allocation is billed continuously for every second the instance is up, whether idle or actively serving a request. That makes uptime × rate a close proxy for the real charge, modulo committed-use discounts, free-tier credits, or rates changing after this was written.
-- Verify current rates against <https://cloud.google.com/run/pricing> before relying on this for budget decisions; update `GPU_PER_SECOND`/`CPU_PER_VCPU_SECOND`/`MEMORY_PER_GIB_SECOND` in `utils/cloudrun_cost.py` if they drift.
+- Rates in code (`CPU_PER_VCPU_SECOND`, `MEMORY_PER_GIB_SECOND`, `GPU_PER_SECOND`) are Tier 1 on-demand instance-based list prices as of `RATES_AS_OF` (see constants in `utils/cloudrun_cost.py`), matching <https://cloud.google.com/run/pricing> for regions such as europe-west1. Re-verify and update those constants if list prices drift.
 - `cpu`/`memory_gib`/`gpu_type`/`gpu_zonal_redundancy` in the config must match what the Cloud Run service was actually deployed with (see the corresponding `deploy-*.sh` script in `GCP-CLOUDRUN-AImodels/`); the tool has no way to introspect the live deployment's resource allocation.
 
 ### Pre-flight GPU residency check (`benchmark/gpu_check.py`)

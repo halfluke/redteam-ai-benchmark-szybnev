@@ -52,6 +52,9 @@ cloudrun_cost:
   gpu_zonal_redundancy: false
   cpu: 8
   memory_gib: 32
+  currency: GBP
+  usd_per_unit: 1.33
+  progress_every: 5
 
 export:
   formats:

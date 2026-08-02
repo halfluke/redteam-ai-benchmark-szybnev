@@ -142,6 +142,9 @@ class CloudRunCostConfig:
     This is an estimate derived from published on-demand instance-based-billing
     rates (CPU/memory/GPU per-second) multiplied by observed instance uptime,
     not the authoritative GCP invoice. See utils/cloudrun_cost.py.
+
+    `usd_per_unit` is how many USD equal one unit of `currency` (e.g. 1.33 for GBP).
+    `max_cost` is optional and expressed in display-currency units.
     """
 
     enabled: bool = False
@@ -149,6 +152,10 @@ class CloudRunCostConfig:
     gpu_zonal_redundancy: bool = False
     cpu: float = 8
     memory_gib: float = 32
+    currency: str = "GBP"
+    usd_per_unit: float = 1.33
+    progress_every: int = 5
+    max_cost: Optional[float] = None
 
 
 @dataclass
@@ -245,12 +252,17 @@ def _dict_to_gpu_check_config(data: Dict[str, Any]) -> GpuCheckConfig:
 
 def _dict_to_cloudrun_cost_config(data: Dict[str, Any]) -> CloudRunCostConfig:
     """Convert dict to CloudRunCostConfig."""
+    max_cost = data.get("max_cost")
     return CloudRunCostConfig(
         enabled=data.get("enabled", False),
         gpu_type=data.get("gpu_type", "nvidia-l4"),
         gpu_zonal_redundancy=data.get("gpu_zonal_redundancy", False),
         cpu=data.get("cpu", 8),
         memory_gib=data.get("memory_gib", 32),
+        currency=str(data.get("currency", "GBP")).upper(),
+        usd_per_unit=float(data.get("usd_per_unit", 1.33)),
+        progress_every=int(data.get("progress_every", 5)),
+        max_cost=float(max_cost) if max_cost is not None else None,
     )
 
 
@@ -480,6 +492,13 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("gpu_check.min_vram_fraction must be between 0 and 1")
     if config.gpu_check.timeout_s <= 0:
         raise ValueError("gpu_check.timeout_s must be > 0")
+
+    if config.cloudrun_cost.usd_per_unit <= 0:
+        raise ValueError("cloudrun_cost.usd_per_unit must be > 0")
+    if config.cloudrun_cost.progress_every < 0:
+        raise ValueError("cloudrun_cost.progress_every must be >= 0")
+    if config.cloudrun_cost.max_cost is not None and config.cloudrun_cost.max_cost <= 0:
+        raise ValueError("cloudrun_cost.max_cost must be > 0 when set")
 
     if config.cloudrun_cost.enabled:
         if config.cloudrun_cost.cpu <= 0:

@@ -3,13 +3,16 @@
 # Requires: gcloud CLI logged in (gcloud auth login).
 # Tokens refresh automatically; no proxy needed.
 #
-# Warm up first when MIN_INSTANCES=0 (cold start may take 2-3 min), then run:
-#   ./scripts/warmup_bugtrace.sh
+# Cold start may take 2-3 min when min-instances=0. Prefer the wrapper (it warms
+# up automatically and tracks Cloud Run cost session start):
 #   ./scripts/run_bugtrace_baseline.sh
 #
-# Override endpoint via environment:
-#   export BUGTRACE_ENDPOINT=https://your-service-hash.a.run.app
-#   source scripts/cloudrun_env.sh
+# Or warm alone, then run without a second warmup:
+#   ./scripts/warmup_bugtrace.sh
+#   SKIP_PREFLIGHT=1 ./scripts/run_bugtrace_baseline.sh
+#
+# Endpoints: scripts/local_env.sh (auto-sourced when present) or export
+# BUGTRACE_ENDPOINT / BUGTRACE_MODEL before running.
 
 provider:
   name: ollama
@@ -54,6 +57,9 @@ cloudrun_cost:
   gpu_zonal_redundancy: false
   cpu: 8
   memory_gib: 32
+  currency: GBP
+  usd_per_unit: 1.33
+  progress_every: 5
 
 export:
   formats:

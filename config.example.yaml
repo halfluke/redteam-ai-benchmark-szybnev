@@ -78,18 +78,23 @@ optimization:
 #   min_vram_fraction: 0.9
 #   timeout_s: 210
 
-# Estimated Cloud Run cost, printed once at the end of the run (or once per
-# model in `interactive` mode). This is an ESTIMATE from published on-demand
-# instance-based-billing rates (CPU/memory/GPU per second) multiplied by
-# observed instance uptime -- not the authoritative GCP invoice, since real
-# billing data lags actual usage by ~24h with no real-time API. Only
-# meaningful when targeting a Cloud Run GPU deployment.
+# Estimated Cloud Run cost (USD + display currency), mid-run projections,
+# optional abort, and persistence into result JSON / request-log summary.
+# ESTIMATE from published on-demand instance-based-billing rates × observed
+# session uptime (including warmup when CLOUDRUN_COST_SESSION_START is set) --
+# not the authoritative GCP invoice. See utils/cloudrun_cost.py and
+# docs/agent-reference.md. Only meaningful for Cloud Run GPU deployments.
 # cloudrun_cost:
 #   enabled: false
 #   gpu_type: nvidia-l4        # nvidia-l4 | nvidia-rtx-pro-6000
 #   gpu_zonal_redundancy: false
 #   cpu: 8                     # vCPUs allocated to the Cloud Run service
 #   memory_gib: 32             # memory (GiB) allocated to the Cloud Run service
+#   currency: GBP              # display currency alongside USD
+#   usd_per_unit: 1.33         # USD per 1 unit of currency (approx; no live FX)
+#   progress_every: 5          # print spent/projected every N questions (0=off)
+#   # max_cost: 3              # optional abort when display currency spend >= this
+#                              # CLI: --max-cloudrun-cost 3
 
 # Benchmark Settings
 questions_file: datasets/v2/benchmark.jsonl

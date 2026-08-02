@@ -23,3 +23,10 @@ PING_PROMPT="${PING_PROMPT:-Say OK}"
 PING_MAX_TOKENS="${PING_MAX_TOKENS:-16}"
 PING_TIMEOUT_S="${PING_TIMEOUT_S:-90}"
 OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
+
+# Export so child processes (e.g. warmup_*.sh spawned by run_*_baseline.sh) see
+# the same values. Assignments above alone are not exported by default.
+export TONGYI_ENDPOINT TONGYI_MODEL
+export DEEPHAT_ENDPOINT DEEPHAT_MODEL
+export BUGTRACE_ENDPOINT BUGTRACE_MODEL
+export PING_PROMPT PING_MAX_TOKENS PING_TIMEOUT_S OLLAMA_KEEP_ALIVE

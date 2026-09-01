@@ -3,13 +3,12 @@
 # Requires: gcloud CLI logged in (gcloud auth login).
 # Tokens refresh automatically; no proxy needed.
 #
-# Warm up first when MIN_INSTANCES=0 (cold start), then run:
-#   ./scripts/warmup_tongyi.sh
-#   uv run run_benchmark.py run ollama -m <model> --config configs/cloudrun_ollama.yaml
-#
-# Override endpoint via environment:
-#   export TONGYI_ENDPOINT=https://your-service-hash.a.run.app
-#   source scripts/cloudrun_env.sh && ./scripts/run_tongyi_baseline.sh
+# Set endpoint + model via environment, then run (example: Qwen3 8B on Cloud Run):
+#   export OLLAMA_CLOUDRUN_ENDPOINT=https://your-qwen-service.a.run.app
+#   export OLLAMA_CLOUDRUN_MODEL=qwen3:8b
+#   uv run run_benchmark.py run ollama \
+#     -m "$OLLAMA_CLOUDRUN_MODEL" -e "$OLLAMA_CLOUDRUN_ENDPOINT" \
+#     --config configs/cloudrun_ollama.yaml
 #
 # Fallback (local): set endpoint to http://127.0.0.1:11434 and remove auth.
 
@@ -43,9 +42,9 @@ gpu_check:
   min_vram_fraction: 0.9
   timeout_s: 210
 
-# Estimate only (see utils/cloudrun_cost.py) -- matches deploy-tongyi.sh's
-# defaults (8 CPU, 32Gi memory, 1x L4, --no-gpu-zonal-redundancy). Update if
-# you deployed with different MEMORY/CPU overrides.
+# Estimate only (see utils/cloudrun_cost.py) -- matches deploy.sh defaults
+# (8 CPU, 32Gi memory, 1x L4, --no-gpu-zonal-redundancy). Update if you
+# deployed with different MEMORY/CPU overrides.
 cloudrun_cost:
   enabled: true
   gpu_type: nvidia-l4

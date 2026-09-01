@@ -8,10 +8,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   exit 1
 fi
 
-TONGYI_ENDPOINT="${TONGYI_ENDPOINT:-https://YOUR-OLLAMA-SERVICE-HASH.a.run.app}"
-TONGYI_MODEL="${TONGYI_MODEL:-your-ollama-model-id}"
-
-DEEPHAT_ENDPOINT="${DEEPHAT_ENDPOINT:-https://YOUR-VLLM-SERVICE-HASH.a.run.app}"
+# Cloud Run — vLLM target (DeepHat or equivalent)
 DEEPHAT_MODEL="${DEEPHAT_MODEL:-YourOrg/YourModel}"
 
 BUGTRACE_ENDPOINT="${BUGTRACE_ENDPOINT:-https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app}"
@@ -26,7 +23,6 @@ OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 
 # Export so child processes (e.g. warmup_*.sh spawned by run_*_baseline.sh) see
 # the same values. Assignments above alone are not exported by default.
-export TONGYI_ENDPOINT TONGYI_MODEL
 export DEEPHAT_ENDPOINT DEEPHAT_MODEL
 export BUGTRACE_ENDPOINT BUGTRACE_MODEL
 export PING_PROMPT PING_MAX_TOKENS PING_TIMEOUT_S OLLAMA_KEEP_ALIVE

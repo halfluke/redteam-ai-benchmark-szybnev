@@ -183,7 +183,7 @@ cloudrun_is_placeholder_endpoint() {
   [[ "$endpoint" == *YOUR-* || "$endpoint" == *SERVICE-HASH* || "$endpoint" == *example* || "$endpoint" == *OPTIMIZER-LAN-IP* ]]
 }
 
-# Resolve service + region for a logical name (bugtrace|deephat|tongyi).
+# Resolve service + region for a logical name (bugtrace|deephat).
 # Uses NAME_SERVICE / CLOUDRUN_REGION overrides, else parses NAME_ENDPOINT.
 cloudrun_resolve_target() {
   local name="$1"
@@ -198,10 +198,6 @@ cloudrun_resolve_target() {
     deephat)
       endpoint_var=DEEPHAT_ENDPOINT
       service_var=DEEPHAT_SERVICE
-      ;;
-    tongyi)
-      endpoint_var=TONGYI_ENDPOINT
-      service_var=TONGYI_SERVICE
       ;;
     *)
       die "Unknown Cloud Run target: $name"

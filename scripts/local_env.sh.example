@@ -12,11 +12,6 @@
 # export CLOUDRUN_PROJECT="your-gcp-project"
 # export CLOUDRUN_REGION="europe-west1"
 
-# Cloud Run — Ollama target (Tongyi or equivalent)
-export TONGYI_ENDPOINT="https://YOUR-OLLAMA-SERVICE-HASH.a.run.app"
-export TONGYI_MODEL="your-ollama-model-id"
-# export TONGYI_SERVICE="tongyi-deepresearch-iq2s"   # optional if URL parses cleanly
-
 # Cloud Run — vLLM target (DeepHat or equivalent)
 export DEEPHAT_ENDPOINT="https://YOUR-VLLM-SERVICE-HASH.a.run.app"
 export DEEPHAT_MODEL="YourOrg/YourModel"

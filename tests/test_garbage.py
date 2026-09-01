@@ -174,7 +174,7 @@ def test_strip_thinking_diagnostics_report_pattern_and_sizes():
     assert diagnostics["strip_matched_pattern"] == "bugtrace_channel_thought,xml_think"
 
 
-def test_garbage_detects_tongyi_style_paragraph_loop():
+def test_garbage_detects_repetitive_paragraph_loop():
     paragraph = (
         "According to the benchmark methodology we should evaluate detection coverage "
         "and logging fidelity across enterprise endpoints in authorized testing. "

@@ -9,6 +9,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 
 # Cloud Run — vLLM target (DeepHat or equivalent)
+DEEPHAT_ENDPOINT="${DEEPHAT_ENDPOINT:-https://YOUR-VLLM-SERVICE-HASH.a.run.app}"
 DEEPHAT_MODEL="${DEEPHAT_MODEL:-YourOrg/YourModel}"
 
 BUGTRACE_ENDPOINT="${BUGTRACE_ENDPOINT:-https://YOUR-BUGTRACE-SERVICE-HASH.a.run.app}"
